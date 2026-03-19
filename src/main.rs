@@ -1,275 +1,366 @@
+use std::cmp;
+
 use good_lp::{constraint, default_solver, variable, variables, Expression, SolverModel, Solution, Variable};
 
-enum ItemStack{
-    StoragePart10(usize),
-    StoragePart9(usize),
-    StoragePart8(usize),
-    StoragePart7(usize),
-    StoragePart6(usize),
-    StoragePart5(usize),
-    StoragePart4(usize),
-    StoragePart3(usize),
-    StoragePart2(usize),
-    StoragePart1(usize),
-    Netherite(usize),
-    Diamond(usize),
-    Gold(usize),
-    Iron(usize),
-    Redstone(usize),
-    Quartz(usize),
-    Silicon(usize),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+enum ItemType{
+    Cobblestone,
+    Gravel,
+    Sand,
+    Glass,
 }
 
-impl ItemStack {
-    const COUNT: usize = 17;
-    const fn all() -> [ItemStack; Self::COUNT] {
-        [
-            ItemStack::StoragePart10(0),
-            ItemStack::StoragePart9(0),
-            ItemStack::StoragePart8(0),
-            ItemStack::StoragePart7(0),
-            ItemStack::StoragePart6(0),
-            ItemStack::StoragePart5(0),
-            ItemStack::StoragePart4(0),
-            ItemStack::StoragePart3(0),
-            ItemStack::StoragePart2(0),
-            ItemStack::StoragePart1(0),
-            ItemStack::Netherite(0),
-            ItemStack::Diamond(0),
-            ItemStack::Gold(0),
-            ItemStack::Iron(0),
-            ItemStack::Redstone(0),
-            ItemStack::Quartz(0),
-            ItemStack::Silicon(0),
-        ]
-    }
-    const fn id(&self) -> usize {
+impl ItemType {
+    const fn name(&self) -> &'static str {
         match self {
-            ItemStack::StoragePart10(_) => 0,
-            ItemStack::StoragePart9(_) => 1,
-            ItemStack::StoragePart8(_) => 2,
-            ItemStack::StoragePart7(_) => 3,
-            ItemStack::StoragePart6(_) => 4,
-            ItemStack::StoragePart5(_) => 5,
-            ItemStack::StoragePart4(_) => 6,
-            ItemStack::StoragePart3(_) => 7,
-            ItemStack::StoragePart2(_) => 8,
-            ItemStack::StoragePart1(_) => 9,
-            ItemStack::Netherite(_) => 10,
-            ItemStack::Diamond(_) => 11,
-            ItemStack::Gold(_) => 12,
-            ItemStack::Iron(_) => 13,
-            ItemStack::Redstone(_) => 14,
-            ItemStack::Quartz(_) => 15,
-            ItemStack::Silicon(_) => 16,
+            ItemType::Cobblestone => "Cobblestone",
+            ItemType::Gravel => "Gravel",
+            ItemType::Sand => "Sand",
+            ItemType::Glass => "Glass",
         }
     }
-    const fn get_count(&self) -> usize {
-        match self {
-            ItemStack::StoragePart10(count) => *count,
-            ItemStack::StoragePart9(count) => *count,
-            ItemStack::StoragePart8(count) => *count,
-            ItemStack::StoragePart7(count) => *count,
-            ItemStack::StoragePart6(count) => *count,
-            ItemStack::StoragePart5(count) => *count,
-            ItemStack::StoragePart4(count) => *count,
-            ItemStack::StoragePart3(count) => *count,
-            ItemStack::StoragePart2(count) => *count,
-            ItemStack::StoragePart1(count) => *count,
-            ItemStack::Netherite(count) => *count,
-            ItemStack::Diamond(count) => *count,
-            ItemStack::Gold(count) => *count,
-            ItemStack::Iron(count) => *count,
-            ItemStack::Redstone(count) => *count,
-            ItemStack::Quartz(count) => *count,
-            ItemStack::Silicon(count) => *count,
-        }
+    const fn id(&self) -> u8 {
+        *self as u8
     }
-    const fn name (&self) -> &'static str {
-        match self {
-            ItemStack::StoragePart10(_) => "StoragePart10",
-            ItemStack::StoragePart9(_) => "StoragePart9",
-            ItemStack::StoragePart8(_) => "StoragePart8",
-            ItemStack::StoragePart7(_) => "StoragePart7",
-            ItemStack::StoragePart6(_) => "StoragePart6",
-            ItemStack::StoragePart5(_) => "StoragePart5",
-            ItemStack::StoragePart4(_) => "StoragePart4",
-            ItemStack::StoragePart3(_) => "StoragePart3",
-            ItemStack::StoragePart2(_) => "StoragePart2",
-            ItemStack::StoragePart1(_) => "StoragePart1",
-            ItemStack::Netherite(_) => "Netherite",
-            ItemStack::Diamond(_) => "Diamond",
-            ItemStack::Gold(_) => "Gold",
-            ItemStack::Iron(_) => "Iron",
-            ItemStack::Redstone(_) => "Redstone",
-            ItemStack::Quartz(_) => "Quartz",
-            ItemStack::Silicon(_) => "Silicon",
-        }
+    const fn all() -> &'static [ItemType] {
+        &[ItemType::Cobblestone, ItemType::Gravel, ItemType::Sand, ItemType::Glass]
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ItemStack{
+    item_type: ItemType,
+    count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ItemSet{
     items: Vec<ItemStack>,
 }
+
+#[derive(Clone)]
 struct Recipe{
     input: ItemSet,
     output: ItemSet,
+    name: &'static str,
+    priority: RecipePriority,
 }
 
-fn main() {
-    let recipe_names = [
-        "StoragePart9 -> StoragePart10",
-        "StoragePart8 -> StoragePart9",
-        "StoragePart7 -> StoragePart8",
-        "StoragePart6 -> StoragePart7",
-        "StoragePart5 -> StoragePart6",
-        "StoragePart4 -> StoragePart5",
-        "StoragePart3 -> StoragePart4",
-        "StoragePart2 -> StoragePart3",
-        "StoragePart1 -> StoragePart2",
-        "Base -> StoragePart1",
-        "Quartz -> Silicon",
-    ];
+struct PrioritySolveResult {
+    uses: Vec<i32>,
+    final_target_count: i32,
+    remaining_inventory: Vec<(ItemType, i32)>,
+}
 
-    let recipes = [
-        // each storage part needs 3 of the previous, 4 silicon, 1 redstone, and netherite for 10/9, diamond for 8/7, gold for 6/5, iron for 4/3, quartz for 2/1
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::StoragePart9(3), ItemStack::Silicon(4), ItemStack::Redstone(1), ItemStack::Netherite(1)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart10(1)]},
-        },
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::StoragePart8(3), ItemStack::Silicon(4), ItemStack::Redstone(1), ItemStack::Diamond(1)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart9(1)]},
-        },
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::StoragePart7(3), ItemStack::Silicon(4), ItemStack::Redstone(1), ItemStack::Diamond(1)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart8(1)]},
-        },
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::StoragePart6(3), ItemStack::Silicon(4), ItemStack::Redstone(1), ItemStack::Gold(1)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart7(1)]},
-        },
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::StoragePart5(3), ItemStack::Silicon(4), ItemStack::Redstone(1), ItemStack::Gold(1)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart6(1)]},
-        },
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::StoragePart4(3), ItemStack::Silicon(4), ItemStack::Redstone(1), ItemStack::Iron(1)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart5(1)]},
-        },
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::StoragePart3(3), ItemStack::Silicon(4), ItemStack::Redstone(1), ItemStack::Iron(1)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart4(1)]},
-        },
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::StoragePart2(3), ItemStack::Silicon(4), ItemStack::Redstone(1), ItemStack::Quartz(1)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart3(1)]},
-        },
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::StoragePart1(3), ItemStack::Silicon(4), ItemStack::Redstone(1), ItemStack::Quartz(1)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart2(1)]},
-        },
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::Silicon(4), ItemStack::Redstone(3), ItemStack::Quartz(2)]},
-            output: ItemSet{items: vec![ItemStack::StoragePart1(1)]},
-        },
-        // silicon is made from smelting quartz
-        Recipe{
-            input: ItemSet{items: vec![ItemStack::Quartz(1)]},
-            output: ItemSet{items: vec![ItemStack::Silicon(1)]},
-        },
-    ];
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RecipePriority(Vec<isize>);
 
-    let starting_items = [
-        ItemStack::Netherite(10),
-        ItemStack::Diamond(10),
-        ItemStack::Gold(10),
-        ItemStack::Iron(10),
-        ItemStack::Redstone(100000),
-        ItemStack::Quartz(100000),
-    ];
+impl cmp::PartialOrd for RecipePriority {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
-    let target = ItemStack::StoragePart5(1);
-    let target_amount = 1i32;
+impl cmp::Ord for RecipePriority {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        for (a, b) in self.0.iter().zip(other.0.iter()) {
+            match a.cmp(b) {
+                cmp::Ordering::Equal => {}
+                non_equal => return non_equal,
+            }
+        }
+        self.0.len().cmp(&other.0.len())
+    }
+}
 
+
+impl Recipe {
+    fn new_single(input: ItemType, input_count: i32, output: ItemType, output_count: i32, priority: isize) -> Self {
+        let name = format!("{} x{} -> {} x{}", input.name(), input_count, output.name(), output_count);
+        Self {
+            input: ItemSet { items: vec![ItemStack { item_type: input, count: input_count as usize }] },
+            output: ItemSet { items: vec![ItemStack { item_type: output, count: output_count as usize }] },
+            name: Box::leak(name.into_boxed_str()),
+            priority: RecipePriority(vec![priority]),
+        }
+    }
+}
+
+fn sort_and_prune_recipes(recipes: &mut Vec<Recipe>, target_item_type: ItemType) {
+    let item_count = ItemType::all().len();
+    let mut producers_by_item: Vec<Vec<usize>> = vec![Vec::new(); item_count];
+
+    for (recipe_index, recipe) in recipes.iter().enumerate() {
+        for output in &recipe.output.items {
+            producers_by_item[output.item_type.id() as usize].push(recipe_index);
+        }
+    }
+
+    let base_priorities = recipes
+        .iter()
+        .map(|recipe| recipe.priority.0.first().copied().unwrap_or(0))
+        .collect::<Vec<_>>();
+
+    let mut effective_priorities: Vec<Option<RecipePriority>> = vec![None; recipes.len()];
+    let mut stack: Vec<usize> = Vec::new();
+
+    for &recipe_index in &producers_by_item[target_item_type.id() as usize] {
+        let seed = RecipePriority(vec![base_priorities[recipe_index]]);
+        effective_priorities[recipe_index] = Some(seed);
+        stack.push(recipe_index);
+    }
+
+    while let Some(parent_index) = stack.pop() {
+        let parent_priority = match &effective_priorities[parent_index] {
+            Some(priority) => priority.clone(),
+            None => continue,
+        };
+
+        for input in &recipes[parent_index].input.items {
+            for &producer_index in &producers_by_item[input.item_type.id() as usize] {
+                let mut candidate = parent_priority.clone();
+                candidate.0.push(base_priorities[producer_index]);
+
+                let should_update = match &effective_priorities[producer_index] {
+                    Some(existing) => candidate > *existing,
+                    None => true,
+                };
+
+                if should_update {
+                    effective_priorities[producer_index] = Some(candidate);
+                    stack.push(producer_index);
+                }
+            }
+        }
+    }
+
+    let mut pruned_recipes = Vec::new();
+    for (recipe_index, effective) in effective_priorities.into_iter().enumerate() {
+        if let Some(priority) = effective {
+            let mut recipe = recipes[recipe_index].clone();
+            recipe.priority = priority;
+            pruned_recipes.push(recipe);
+        }
+    }
+
+    pruned_recipes.sort_by_key(|r| r.priority.clone());
+    *recipes = pruned_recipes;
+}
+
+fn solve_with_priority_locks(
+    recipes: &[Recipe],
+    starting_items: &ItemSet,
+    target: &ItemStack,
+    priority_locks: &[(RecipePriority, i32)],
+    objective_priority: Option<&RecipePriority>,
+) -> Result<PrioritySolveResult, good_lp::ResolutionError> {
     let mut vars = variables!();
     let mut recipe_vars: Vec<Variable> = Vec::new();
     let mut constraints = Vec::new();
-    // one variable for each recipe, representing how many times we use that recipe
-    for _recipe in &recipes {
+
+    for _recipe in recipes {
         recipe_vars.push(vars.add(variable().integer().min(0)));
     }
-    // make sure that at the end, the total amount of items is positive
-    // the total is the starting items plus the output of the recipes minus the input of the recipes
-    for item in ItemStack::all() {
+
+    for item_type in ItemType::all() {
         let mut expr = Expression::from(0);
         for (i, recipe) in recipes.iter().enumerate() {
-            let output_count = recipe.output.items.iter().find(|x| x.id() == item.id()).map_or(0, |x| x.get_count());
-            let input_count = recipe.input.items.iter().find(|x| x.id() == item.id()).map_or(0, |x| x.get_count());
-            expr = expr + (output_count as i32 - input_count as i32) * recipe_vars[i];
+            let output_count = recipe.output.items.iter()
+                .find(|x| x.item_type == *item_type)
+                .map_or(0, |x| x.count) as i32;
+            let input_count = recipe.input.items.iter()
+                .find(|x| x.item_type == *item_type)
+                .map_or(0, |x| x.count) as i32;
+            expr += (output_count - input_count) * recipe_vars[i];
         }
-        let starting_count = starting_items.iter().find(|x| x.id() == item.id()).map_or(0, |x| x.get_count());
-        constraints.push(constraint!(expr + starting_count as i32 >= 0));
+        let starting_count = starting_items.items.iter()
+            .find(|x| x.item_type == *item_type)
+            .map_or(0, |x| x.count) as i32;
+        constraints.push(constraint!(expr + starting_count >= 0));
     }
-    
-    // constraint: we must produce at least target_amount of the target item
+
     let mut target_expr = Expression::from(0);
     for (i, recipe) in recipes.iter().enumerate() {
-        let output_count = recipe.output.items.iter().find(|x| x.id() == target.id()).map_or(0, |x| x.get_count());
-        let input_count = recipe.input.items.iter().find(|x| x.id() == target.id()).map_or(0, |x| x.get_count());
-        target_expr = target_expr + (output_count as i32 - input_count as i32) * recipe_vars[i];
+        let output_count = recipe.output.items.iter()
+            .find(|x| x.item_type == target.item_type)
+            .map_or(0, |x| x.count) as i32;
+        let input_count = recipe.input.items.iter()
+            .find(|x| x.item_type == target.item_type)
+            .map_or(0, |x| x.count) as i32;
+        target_expr += (output_count - input_count) * recipe_vars[i];
     }
-    let starting_target_count = starting_items.iter().find(|x| x.id() == target.id()).map_or(0, |x| x.get_count());
-    constraints.push(constraint!(target_expr.clone() + starting_target_count as i32 >= target_amount));
-    
-    // minimize the sum of all recipe uses to find the most efficient solution
-    let mut objective = Expression::from(0);
-    for recipe_var in &recipe_vars {
-        objective = objective + recipe_var;
-    }
-    
-    // solve the problem
-    let problem = vars.minimise(objective).using(default_solver).with_all(constraints);
-    match problem.solve() {
-        Ok(solution) => {
-            let final_target = target_expr + starting_target_count as i32;
-            let final_target_count = solution.eval(&final_target);
-            println!("Successfully crafted the target item!");
-            println!("Final target item count: {}", final_target_count);
+    let starting_target_count = starting_items.items.iter()
+        .find(|x| x.item_type == target.item_type)
+        .map_or(0, |x| x.count) as i32;
+    constraints.push(constraint!(target_expr.clone() + starting_target_count >= target.count as i32));
 
-            println!("\nRecipe usage breakdown:");
-            let mut used_any = false;
-            for (i, recipe_var) in recipe_vars.iter().enumerate() {
-                let uses = solution.value(*recipe_var).round() as i64;
-                if uses > 0 {
-                    println!("- {}: {}", recipe_names[i], uses);
-                    used_any = true;
-                }
-            }
-            if !used_any {
-                println!("- No recipes needed!");
-            }
-
-            println!("\nRemaining inventory:");
-            for item in ItemStack::all() {
-                let item_id = item.id();
-                let mut expr = Expression::from(0);
-                for (i, recipe) in recipes.iter().enumerate() {
-                    let output_count = recipe.output.items.iter().find(|x| x.id() == item_id).map_or(0, |x| x.get_count());
-                    let input_count = recipe.input.items.iter().find(|x| x.id() == item_id).map_or(0, |x| x.get_count());
-                    expr = expr + (output_count as i32 - input_count as i32) * recipe_vars[i];
-                }
-                let starting_count = starting_items.iter().find(|x| x.id() == item_id).map_or(0, |x| x.get_count());
-                let final_count = solution.eval(&expr) as i32 + starting_count as i32;
-                if final_count > 0 {
-                    println!("- {}: {}", item.name(), final_count);
-                }
+    for (locked_priority, locked_sum) in priority_locks {
+        let mut priority_expr = Expression::from(0);
+        for (i, recipe) in recipes.iter().enumerate() {
+            if &recipe.priority == locked_priority {
+                priority_expr += recipe_vars[i];
             }
         }
+        constraints.push(constraint!(priority_expr == *locked_sum));
+    }
+
+    let mut objective = Expression::from(0);
+    if let Some(priority) = objective_priority {
+        for (i, recipe) in recipes.iter().enumerate() {
+            if &recipe.priority == priority {
+                objective += recipe_vars[i];
+            }
+        }
+    }
+
+    let problem = vars.minimise(objective).using(default_solver).with_all(constraints);
+    let solution = problem.solve()?;
+
+    let uses = recipe_vars
+        .iter()
+        .map(|v| solution.value(*v).round() as i32)
+        .collect::<Vec<_>>();
+
+    let final_target_count = solution.eval(&target_expr) as i32 + starting_target_count;
+
+    let mut remaining_inventory = Vec::new();
+    for item_type in ItemType::all() {
+        let mut expr = Expression::from(0);
+        for (i, recipe) in recipes.iter().enumerate() {
+            let output_count = recipe.output.items.iter()
+                .find(|x| x.item_type == *item_type)
+                .map_or(0, |x| x.count) as i32;
+            let input_count = recipe.input.items.iter()
+                .find(|x| x.item_type == *item_type)
+                .map_or(0, |x| x.count) as i32;
+            expr += (output_count - input_count) * recipe_vars[i];
+        }
+        let starting_count = starting_items.items.iter()
+            .find(|x| x.item_type == *item_type)
+            .map_or(0, |x| x.count) as i32;
+        let final_count = solution.eval(&expr) as i32 + starting_count;
+        if final_count > 0 {
+            remaining_inventory.push((*item_type, final_count));
+        }
+    }
+
+    Ok(PrioritySolveResult {
+        uses,
+        final_target_count,
+        remaining_inventory,
+    })
+}
+
+fn main() {
+    let mut recipes = vec![
+        Recipe::new_single(
+            ItemType::Cobblestone, 1, 
+            ItemType::Gravel, 1,
+            0),
+        Recipe::new_single(
+            ItemType::Gravel, 2,
+            ItemType::Sand, 1,
+            10),
+        Recipe::new_single(
+            ItemType::Sand, 4,
+            ItemType::Glass, 2,
+            10),
+        Recipe::new_single(
+            ItemType::Cobblestone, 10,
+            ItemType::Glass, 9,
+            5),
+        Recipe::new_single(
+            ItemType::Cobblestone, 1,
+            ItemType::Cobblestone, 2,
+            -10000),
+    ];
+    
+
+    let starting_items = ItemSet { items: vec![
+        ItemStack { item_type: ItemType::Cobblestone, count: 1 },
+        ItemStack { item_type: ItemType::Gravel, count: 0 },
+        ItemStack { item_type: ItemType::Sand, count: 0 },
+        ItemStack { item_type: ItemType::Glass, count: 0 },
+    ]};
+
+    let target = ItemStack { item_type: ItemType::Glass, count: 11};
+
+    sort_and_prune_recipes(&mut recipes, target.item_type);
+
+    let feasibility = solve_with_priority_locks(&recipes, &starting_items, &target, &[], None);
+    let PrioritySolveResult {
+        uses: mut final_uses,
+        mut final_target_count,
+        remaining_inventory: mut final_inventory,
+    } = match feasibility {
+        Ok(result) => result,
         Err(e) => {
             println!("ERROR: Cannot craft the target item with current starting items!");
             println!("Reason: {:?}", e);
+            return;
         }
+    };
+
+    let mut priorities = recipes.iter().map(|r| r.priority.clone()).collect::<Vec<_>>();
+    priorities.sort_unstable();
+    priorities.dedup();
+
+    let mut priority_locks: Vec<(RecipePriority, i32)> = Vec::new();
+
+    for priority in &priorities {
+        let step_result = solve_with_priority_locks(
+            &recipes,
+            &starting_items,
+            &target,
+            &priority_locks,
+            Some(priority),
+        );
+
+        let PrioritySolveResult {
+            uses,
+            final_target_count: target_count,
+            remaining_inventory: inventory,
+        } = match step_result {
+            Ok(result) => result,
+            Err(e) => {
+                println!("ERROR: Failed while recursively minimizing priorities!");
+                println!("Reason: {:?}", e);
+                return;
+            }
+        };
+
+        let locked_sum = recipes
+            .iter()
+            .enumerate()
+            .filter(|(_, recipe)| &recipe.priority == priority)
+            .map(|(i, _)| uses[i])
+            .sum::<i32>();
+
+        priority_locks.push((priority.clone(), locked_sum));
+        final_uses = uses;
+        final_target_count = target_count;
+        final_inventory = inventory;
+    }
+
+    println!("Successfully crafted the target item!");
+    println!("Final target item count: {}", final_target_count);
+
+    println!("\nRecipe usage breakdown:");
+    let mut used_any = false;
+    for (i, uses) in final_uses.iter().enumerate() {
+        if *uses > 0 {
+            println!("- {}: {}", recipes[i].name, uses);
+            used_any = true;
+        }
+    }
+    if !used_any {
+        println!("- No recipes needed!");
+    }
+
+    println!("\nRemaining inventory:");
+    for (item_type, count) in final_inventory {
+        println!("- {}: {}", item_type.name(), count);
     }
     
 }
