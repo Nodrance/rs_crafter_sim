@@ -153,7 +153,7 @@ impl CraftingSolution {
     }
 }
 
-fn sort_and_prune_recipes(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, std::collections::HashSet<ItemId>) {
+fn sort_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, std::collections::HashSet<ItemId>) {
     // Each item inherits the best priority key of any recipe that produces it
     // Each recipe inherits the priority key of its best output item type, plus its own base priority
     // This continues until it stabilizes (because loops are possible but will never result in a better key)
@@ -228,7 +228,9 @@ fn sort_and_prune_recipes(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe
 }
 
 fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> CraftingSolution {
-    let (recipes, relevant_item_ids) = sort_and_prune_recipes(recipes, &target);
+    println!("Pruning irrelevant recipes and items...");
+    let (recipes, relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
+    println!("Setting up linear program with {} variables and {} constraints...", recipes.len(), relevant_item_ids.len());
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
     for recipe in &recipes {
@@ -243,7 +245,7 @@ fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: Ite
         for recipe in recipes.iter() {
             let output_count = recipe.output[*item] as i32;
             let input_count = recipe.input[*item] as i32;
-            let var = recipe_to_variable.get(recipe).unwrap();
+            let var = recipe_to_variable.get(recipe).expect("A recipe is being used in the calculate solution function that has no variable attached");
             constraint_expr = constraint_expr + output_count * *var - input_count * *var;
         }
         item_expressions.insert(*item, constraint_expr.clone());
@@ -251,23 +253,26 @@ fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: Ite
     }
 
     let mut recipe_constraints = Vec::new();
+    println!("Setting up initial solution...");
     let mut solution = problem_variables.clone()
         .minimise(0)
         .using(default_solver)
         .with_all(item_constraints.clone())
         .with_all(recipe_constraints.clone())
         .solve().expect("It's impossible to craft the target items with the provided recipes and starting items");
-
+    println!("Initial solution found. Locking in recipe usage one by one based on priority...");
     for recipe in &recipes {
         let var = recipe_to_variable.get(recipe).unwrap();
         solution = problem_variables.clone()
         .minimise(*var).using(default_solver)
         .with_all(item_constraints.clone())
         .with_all(recipe_constraints.clone())
-        .solve().unwrap();
+        .solve().expect("Somehow there's no solution anymore after trying to minimize recipe usage");
         let var_value = solution.value(*var);
         recipe_constraints.push(constraint!(*var == var_value));
+        println!("Locked in {} usages for recipe '{}'", var_value, recipe.name());
     }
+    println!("All recipe usages locked in. Final solution found.");
 
     let mut recipe_values = HashMap::new();
     for recipe in &recipes {
@@ -293,11 +298,54 @@ fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: Ite
     }
 }
 
+fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> usize {
+        let (recipes, relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
+    let mut recipe_to_variable = HashMap::new();
+    let mut problem_variables = ProblemVariables::new();
+    for recipe in &recipes {
+        let var = problem_variables.add(variable().integer().min(0).name(recipe.name()));
+        recipe_to_variable.insert(recipe.clone(), var);
+    }
+
+    let mut item_expressions = HashMap::with_capacity(relevant_item_ids.len());
+    let mut item_constraints = Vec::new();
+    for item in &relevant_item_ids {
+        let mut constraint_expr = Expression::from(starting_items[*item] as i32);
+        for recipe in recipes.iter() {
+            let output_count = recipe.output[*item] as i32;
+            let input_count = recipe.input[*item] as i32;
+            let var = recipe_to_variable.get(recipe).expect("A recipe is being used in the calculate solution function that has no variable attached");
+            constraint_expr = constraint_expr + output_count * *var - input_count * *var;
+        }
+        item_expressions.insert(*item, constraint_expr.clone());
+        item_constraints.push(constraint!(constraint_expr >= target[*item] as i32));
+    }
+
+    let objective = item_expressions.get(&target[0]).expect("A target item is being used in the calculate max function that has no expression attached");
+    let solution = problem_variables.clone()
+        .maximise(objective.clone())
+        .using(default_solver)
+        .with_all(item_constraints.clone())
+        .solve().expect("It's impossible to craft the target items with the provided recipes and starting items");
+
+    let result = objective.eval_with(&solution) - starting_items[target[0]] as f64;
+    if result.fract() != 0.0 {
+        panic!("Solution is somehow not an integer: {}", result);
+    }
+    result as usize
+}
+
 fn main() {
     let recipes = get_recipes();
     let starting_items = get_starting_items();
     let target = get_target();
 
+    let max = calculate_max(recipes.clone(), starting_items.clone(), target.clone());
+    println!("Maximum number of first target item that can be crafted: {}", max);
+    if max == 0 {
+        println!("No solution found, cannot craft any of the target items with the provided recipes and starting items.");
+        return;
+    }
     let solution = calculate_solution(recipes.clone(), starting_items.clone(), target.clone());
     
     println!("Successfully crafted the target item!");
@@ -351,7 +399,7 @@ fn get_recipes() -> Vec<Recipe> {
 
 fn get_starting_items() -> ItemSet {
     ItemSet::new(vec![
-        (COBBLESTONE_ID, 1)
+    (COBBLESTONE_ID, 1),
     ])
 }
 
