@@ -1,5 +1,7 @@
-use std::{cmp, collections::{HashMap, VecDeque}};
-use good_lp::{constraint, default_solver, variable, variables, Expression, SolverModel, Solution, Variable};
+use std::{cmp, collections::HashMap, hash::Hash, ops::Index};
+use good_lp::{Expression, ProblemVariables, Solution, SolverModel, constraint, default_solver, variable};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 
 type ItemId = usize;
 const COBBLESTONE_ID: ItemId = 0;
@@ -13,30 +15,30 @@ fn item_name(item_id: ItemId) -> &'static str {
     ITEM_NAMES.get(item_id).copied().unwrap_or("Unknown")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ItemStack{
-    item_id: ItemId,
-    count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ItemSet{
-    items: Vec<ItemStack>,
+    items: HashMap<ItemId, usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Recipe{
-    input: ItemSet,
-    output: ItemSet,
-    base_priority: isize,
-    effective_priority: Option<isize>,
+impl ItemSet {
+    fn new(items: Vec<(ItemId, usize)>) -> Self {
+        let mut item_set = Self { items: HashMap::new() };
+        for (item_id, count) in items {
+            item_set.add(item_id, count);
+        }
+        item_set
+    }
+
+    fn add(&mut self, item_id: ItemId, count: usize) {
+        *self.items.entry(item_id).or_insert(0) += count;
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PrioritySolveResult {
-    uses: Vec<i32>,
-    final_target_count: i32,
-    remaining_inventory: Vec<(ItemId, i32)>,
+impl Index<ItemId> for ItemSet {
+    type Output = usize;
+    fn index(&self, item_id: ItemId) -> &Self::Output {
+        self.items.get(&item_id).unwrap_or(&0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -63,222 +65,151 @@ impl RecipePriorityKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Recipe{
+    unique_id: usize,
+    input: ItemSet,
+    output: ItemSet,
+    base_priority: isize,
+    effective_priority: Option<isize>,
+}
+impl Hash for Recipe {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.unique_id.hash(state);
+    }
+}
 impl Recipe {
+    fn compute_id(&self) -> usize {
+        let input_items_vec = self.input.items.iter().map(|(&item_id, &count)| (item_id, count)).collect::<Vec<_>>();
+        let output_items_vec = self.output.items.iter().map(|(&item_id, &count)| (item_id, count)).collect::<Vec<_>>();
+        let mut hasher = DefaultHasher::new();
+        for (item_id, count) in input_items_vec {
+            hasher.write_usize(item_id);
+            hasher.write_usize(count);
+        }
+        for (item_id, count) in output_items_vec {
+            hasher.write_usize(item_id);
+            hasher.write_usize(count);
+        }
+        hasher.write_isize(self.base_priority);
+        hasher.finish() as usize
+    }
+
     fn new_single(input: ItemId, input_count: i32, output: ItemId, output_count: i32, priority: isize) -> Self {
-        Self {
-            input: ItemSet { items: vec![ItemStack { item_id: input, count: input_count as usize }] },
-            output: ItemSet { items: vec![ItemStack { item_id: output, count: output_count as usize }] },
+        let mut recipe = Self {
+            input: ItemSet::new(vec![(input, input_count as usize)]),
+            output: ItemSet::new(vec![(output, output_count as usize)]),
             base_priority: priority,
             effective_priority: None,
-        }
+            unique_id: 0,
+        };
+        recipe.unique_id = recipe.compute_id();
+        recipe
+    }
+
+    fn new(input: Vec<(ItemId, usize)>, output: Vec<(ItemId, usize)>, priority: isize) -> Self {
+        let mut recipe = Self {
+            input: ItemSet::new(input),
+            output: ItemSet::new(output),
+            base_priority: priority,
+            effective_priority: None,
+            unique_id: 0,
+        };
+        recipe.unique_id = recipe.compute_id();
+        recipe
     }
 
     fn name(&self) -> String {
         let input_str = self.input.items.iter()
-            .map(|stack| format!("{} x{}", item_name(stack.item_id), stack.count))
+            .map(|(&item_id, &count)| format!("{} x{}", item_name(item_id), count))
             .collect::<Vec<_>>()
             .join(" + ");
         let output_str = self.output.items.iter()
-            .map(|stack| format!("{} x{}", item_name(stack.item_id), stack.count))
+            .map(|(&item_id, &count)| format!("{} x{}", item_name(item_id), count))
             .collect::<Vec<_>>()
             .join(" + ");
         format!("{} -> {}", input_str, output_str)
     }
 }
 
-fn sort_and_prune_recipes(recipes: Vec<Recipe>, target_item_id: ItemId) -> (Vec<Recipe>, Vec<ItemId>) {
+fn sort_and_prune_recipes(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, std::collections::HashSet<ItemId>) {
     // Each item inherits the best priority key of any recipe that produces it
     // Each recipe inherits the priority key of its best output item type, plus its own base priority
     // This continues until it stabilizes (because loops are possible but will never result in a better key)
     // Then we return only recipes and item types that were given a priority key, because those are the only ones that could possibly be relevant to crafting the target item type
     // We also set each recipe's effective priority to an isize that represents its position in the final sorted order, so we can easily lock priorities later when solving
     // We also make items "relevant" if they are produced by a relevant recipe, to make sure we keep byproducts
+    // Depth first search to ensure we always reach a given item/recipe in the lowest priority way
     let mut best_item_priorities: HashMap<ItemId, RecipePriorityKey> = HashMap::new();
-    let mut best_recipe_priorities: HashMap<Recipe, Option<RecipePriorityKey>> = HashMap::new();
-    let mut queue = VecDeque::new();
+    let mut best_recipe_priorities: HashMap<Recipe, RecipePriorityKey> = HashMap::new();
+    let mut stack = Vec::new();
 
-    best_item_priorities.insert(target_item_id, RecipePriorityKey(Vec::new()));
-    queue.push_back(target_item_id);
+    for item_id in target.items.keys() {
+        best_item_priorities.insert(*item_id, RecipePriorityKey(Vec::new()));
+        stack.push(*item_id);
+    }
 
-    while let Some(output_item_id) = queue.pop_front() {
+    while let Some(output_item_id) = stack.pop() {
         let output_priority = best_item_priorities.get(&output_item_id)
             .cloned()
-            .expect("queued items must already have a priority");
+            .expect("Error during recipe sort/prune: Queued items must already have a priority. This should be unreachable.");
 
         for recipe in recipes.iter() {
-            if !recipe.output.items.iter().any(|item| item.item_id == output_item_id) {
+            if !recipe.output.items.iter().any(|(&item_id, _)| item_id == output_item_id) {
+                // This recipe doesn't produce the item we're currently considering, so skip it
                 continue;
             }
 
             let mut candidate_recipe_priority = output_priority.clone();
             candidate_recipe_priority.add_recipe(recipe);
 
+            // True if this recipe doesn't have a priority yet, or if the candidate priority is better than the current best priority for this recipe
             let should_update_recipe = best_recipe_priorities.get(recipe)
-                .and_then(|opt| opt.as_ref())
-                .is_none_or(|current| candidate_recipe_priority < *current);
+                .map(|current| candidate_recipe_priority < *current)
+                .unwrap_or(true);
+            if !should_update_recipe {continue;}
+            best_recipe_priorities.insert(recipe.clone(), candidate_recipe_priority.clone());
 
-            if !should_update_recipe {
-                continue;
-            }
-
-            best_recipe_priorities.insert(recipe.clone(), Some(candidate_recipe_priority.clone()));
-
-            for input in &recipe.input.items {
+            for input_item_id in recipe.input.items.keys() {
                 let should_update_item = best_item_priorities
-                    .get(&input.item_id)
-                    .is_none_or(|current| candidate_recipe_priority < *current);
-
+                    .get(input_item_id)
+                    .map(|current| candidate_recipe_priority < *current)
+                    .unwrap_or(true);
                 if should_update_item {
-                    best_item_priorities.insert(input.item_id, candidate_recipe_priority.clone());
-                    queue.push_back(input.item_id);
+                    best_item_priorities.insert(*input_item_id, candidate_recipe_priority.clone());
+                    stack.push(*input_item_id);
                 }
             }
         }
     }
 
-    let mut sorted_recipes = best_recipe_priorities
-        .into_iter()
-        .filter_map(|(recipe, priority)| priority.map(|priority| (priority, recipe)))
-        .collect::<Vec<_>>();
-    sorted_recipes.sort_by(|(left_priority, left_recipe), (right_priority, right_recipe)| {
-        left_priority
-            .cmp(right_priority)
-            .then_with(|| left_recipe.name().cmp(&right_recipe.name()))
-    });
+    // Take all the recipes we set a priority for, sort them by priority, and assign effective priority values based on that sorted order
+    let mut pruned_recipes = best_recipe_priorities.into_iter().collect::<Vec<_>>();
+    pruned_recipes.sort_by_key(|(_, priority)| priority.clone());
+    for (index, (recipe, _)) in pruned_recipes.iter_mut().enumerate() {
+        recipe.effective_priority = Some(index as isize);
+    }
+    let recipes = pruned_recipes.into_iter().map(|(recipe, _)| recipe).collect::<Vec<_>>();
 
-    let pruned_recipes = sorted_recipes
-        .into_iter()
-        .enumerate()
-        .map(|(index, (_priority, mut recipe))| {
-            recipe.effective_priority = Some(index as isize);
-            recipe
-        })
-        .collect::<Vec<_>>();
-
-    let mut relevant_item_ids = Vec::new();
-    for recipe in &pruned_recipes {
-        for item in &recipe.output.items {
-            if !relevant_item_ids.contains(&item.item_id) {
-                relevant_item_ids.push(item.item_id);
-            }
+    // Take all the item types that are used by those recipes as inputs or outputs, to get the final list of relevant item types (unsorted)
+    // This means byproducts are also tracked by the system so they can be shown in the crafting plan
+    let mut relevant_item_ids = std::collections::HashSet::new();
+    for recipe in &recipes {
+        for item_id in recipe.output.items.keys() {
+            relevant_item_ids.insert(*item_id);
         }
-        for item in &recipe.input.items {
-            if !relevant_item_ids.contains(&item.item_id) {
-                relevant_item_ids.push(item.item_id);
-            }
+        for item_id in recipe.input.items.keys() {
+            relevant_item_ids.insert(*item_id);
         }
     }
-
-    (pruned_recipes, relevant_item_ids)
-}
-
-fn solve_with_priority_locks(
-    recipes: &[Recipe],
-    relevant_item_ids: &[ItemId],
-    starting_items: &ItemSet,
-    target: &ItemStack,
-    priority_locks: &[(isize, i32)],
-    objective_priority: Option<isize>,
-) -> Result<PrioritySolveResult, good_lp::ResolutionError> {
-    let mut vars = variables!();
-    let mut recipe_vars: Vec<Variable> = Vec::new();
-    let mut constraints = Vec::new();
-
-    for _recipe in recipes {
-        recipe_vars.push(vars.add(variable().integer().min(0)));
-    }
-
-    for item_id in relevant_item_ids {
-        let mut expr = Expression::from(0);
-        for (i, recipe) in recipes.iter().enumerate() {
-            let output_count = recipe.output.items.iter()
-                .find(|x| x.item_id == *item_id)
-                .map_or(0, |x| x.count) as i32;
-            let input_count = recipe.input.items.iter()
-                .find(|x| x.item_id == *item_id)
-                .map_or(0, |x| x.count) as i32;
-            expr += (output_count - input_count) * recipe_vars[i];
-        }
-        let starting_count = starting_items.items.iter()
-            .find(|x| x.item_id == *item_id)
-            .map_or(0, |x| x.count) as i32;
-        constraints.push(constraint!(expr + starting_count >= 0));
-    }
-
-    let mut target_expr = Expression::from(0);
-    for (i, recipe) in recipes.iter().enumerate() {
-        let output_count = recipe.output.items.iter()
-            .find(|x| x.item_id == target.item_id)
-            .map_or(0, |x| x.count) as i32;
-        let input_count = recipe.input.items.iter()
-            .find(|x| x.item_id == target.item_id)
-            .map_or(0, |x| x.count) as i32;
-        target_expr += (output_count - input_count) * recipe_vars[i];
-    }
-    let starting_target_count = starting_items.items.iter()
-        .find(|x| x.item_id == target.item_id)
-        .map_or(0, |x| x.count) as i32;
-    constraints.push(constraint!(target_expr.clone() + starting_target_count >= target.count as i32));
-
-    for (locked_priority, locked_sum) in priority_locks {
-        let mut priority_expr = Expression::from(0);
-        for (i, recipe) in recipes.iter().enumerate() {
-            if recipe.effective_priority == Some(*locked_priority) {
-                priority_expr += recipe_vars[i];
-            }
-        }
-        constraints.push(constraint!(priority_expr == *locked_sum));
-    }
-
-    let mut objective = Expression::from(0);
-    if let Some(priority) = objective_priority {
-        for (i, recipe) in recipes.iter().enumerate() {
-            if recipe.effective_priority == Some(priority) {
-                objective += recipe_vars[i];
-            }
-        }
-    }
-
-    let problem = vars.minimise(objective).using(default_solver).with_all(constraints);
-    let solution = problem.solve()?;
-
-    let uses = recipe_vars
-        .iter()
-        .map(|v| solution.value(*v).round() as i32)
-        .collect::<Vec<_>>();
-
-    let final_target_count = solution.eval(&target_expr) as i32 + starting_target_count;
-
-    let mut remaining_inventory = Vec::new();
-    for item_id in relevant_item_ids {
-        let mut expr = Expression::from(0);
-        for (i, recipe) in recipes.iter().enumerate() {
-            let output_count = recipe.output.items.iter()
-                .find(|x| x.item_id == *item_id)
-                .map_or(0, |x| x.count) as i32;
-            let input_count = recipe.input.items.iter()
-                .find(|x| x.item_id == *item_id)
-                .map_or(0, |x| x.count) as i32;
-            expr += (output_count - input_count) * recipe_vars[i];
-        }
-        let starting_count = starting_items.items.iter()
-            .find(|x| x.item_id == *item_id)
-            .map_or(0, |x| x.count) as i32;
-        let final_count = solution.eval(&expr) as i32 + starting_count;
-        if final_count > 0 {
-            remaining_inventory.push((*item_id, final_count));
-        }
-    }
-
-    Ok(PrioritySolveResult {
-        uses,
-        final_target_count,
-        remaining_inventory,
-    })
+    
+    (recipes, relevant_item_ids)
 }
 
 fn main() {
+    // Inputs (higher priority will be preferred):
     let recipes = vec![
+        // One cobblestone into one gravel, priority 0
         Recipe::new_single(
             COBBLESTONE_ID, 1, 
             GRAVEL_ID, 1,
@@ -287,106 +218,83 @@ fn main() {
             GRAVEL_ID, 2,
             SAND_ID, 1,
             10),
-        Recipe::new_single(
-            SAND_ID, 4,
-            GLASS_ID, 2,
-            10),
+        // one sand and one cobbleston into 2 glass, priority 10
+        Recipe::new(
+            vec![(SAND_ID, 1), (COBBLESTONE_ID, 1)],
+            vec![(GLASS_ID, 2)],
+            10
+        ),
         Recipe::new_single(
             COBBLESTONE_ID, 10,
             GLASS_ID, 9,
             5),
         // 1 cobblestone into 2 cobblestone and a diamond, negative 100000 priority
-        Recipe{
-            input: ItemSet { items: vec![ItemStack { item_id: COBBLESTONE_ID, count: 1 }] },
-            output: ItemSet { items: vec![ItemStack { item_id: COBBLESTONE_ID, count: 2 }, ItemStack { item_id: DIAMOND_ID, count: 1 }] },
-            base_priority: -100000,
-            effective_priority: None,
-        }
+        Recipe::new(
+            vec![(COBBLESTONE_ID, 1)],
+            vec![(COBBLESTONE_ID, 2), (DIAMOND_ID, 1)],
+            -100000
+        )
     ];
-    
+    let starting_items = ItemSet::new(vec![
+        (COBBLESTONE_ID, 1)
+    ]);
+    let target = ItemSet::new(vec![(GLASS_ID, 11)]);
 
-    let starting_items = ItemSet { items: vec![
-        ItemStack { item_id: COBBLESTONE_ID, count: 1 }
-    ]};
+    let (recipes, relevant_item_ids) = sort_and_prune_recipes(recipes, &target);
+    let mut recipe_to_variable = HashMap::new();
+    let mut problem_variables = ProblemVariables::new();
+    for recipe in &recipes {
+        let var = problem_variables.add(variable().integer().min(0).name(recipe.name()));
+        recipe_to_variable.insert(recipe.clone(), var);
+    }
 
-    let target = ItemStack { item_id: GLASS_ID, count: 11};
-
-    let (recipes, relevant_item_ids) = sort_and_prune_recipes(recipes, target.item_id);
-
-    let feasibility = solve_with_priority_locks(&recipes, &relevant_item_ids, &starting_items, &target, &[], None);
-    let PrioritySolveResult {
-        uses: mut final_uses,
-        mut final_target_count,
-        remaining_inventory: mut final_inventory,
-    } = match feasibility {
-        Ok(result) => result,
-        Err(e) => {
-            println!("ERROR: Cannot craft the target item with current starting items!");
-            println!("Reason: {:?}", e);
-            return;
+    let mut item_expressions = HashMap::with_capacity(relevant_item_ids.len());
+    let mut item_constraints = Vec::new();
+    for item in &relevant_item_ids {
+        let mut constraint_expr = Expression::from(starting_items[*item] as i32);
+        for recipe in recipes.iter() {
+            let output_count = recipe.output[*item] as i32;
+            let input_count = recipe.input[*item] as i32;
+            let var = recipe_to_variable.get(recipe).unwrap();
+            constraint_expr = constraint_expr + output_count * *var - input_count * *var;
         }
-    };
+        item_expressions.insert(*item, constraint_expr.clone());
+        item_constraints.push(constraint!(constraint_expr >= target[*item] as i32));
+    }
 
-    let mut priorities = recipes.iter().filter_map(|r| r.effective_priority).collect::<Vec<_>>();
-    priorities.sort_unstable();
-    priorities.dedup();
+    let mut recipe_constraints = Vec::new();
+    let mut solution = problem_variables.clone()
+        .minimise(0)
+        .using(default_solver)
+        .with_all(item_constraints.clone())
+        .with_all(recipe_constraints.clone())
+        .solve().expect("It's impossible to craft the target items with the provided recipes and starting items");
 
-    let mut priority_locks: Vec<(isize, i32)> = Vec::new();
-
-    for priority in &priorities {
-        let step_result = solve_with_priority_locks(
-            &recipes,
-            &relevant_item_ids,
-            &starting_items,
-            &target,
-            &priority_locks,
-            Some(*priority),
-        );
-
-        let PrioritySolveResult {
-            uses,
-            final_target_count: target_count,
-            remaining_inventory: inventory,
-        } = match step_result {
-            Ok(result) => result,
-            Err(e) => {
-                println!("ERROR: Failed while recursively minimizing priorities!");
-                println!("Reason: {:?}", e);
-                return;
-            }
-        };
-
-        let locked_sum = recipes
-            .iter()
-            .enumerate()
-            .filter(|(_, recipe)| recipe.effective_priority == Some(*priority))
-            .map(|(i, _)| uses[i])
-            .sum::<i32>();
-
-        priority_locks.push((*priority, locked_sum));
-        final_uses = uses;
-        final_target_count = target_count;
-        final_inventory = inventory;
+    for recipe in &recipes {
+        let var = recipe_to_variable.get(recipe).unwrap();
+        solution = problem_variables.clone()
+        .minimise(*var).using(default_solver)
+        .with_all(item_constraints.clone())
+        .with_all(recipe_constraints.clone())
+        .solve().unwrap();
+        let var_value = solution.value(*var);
+        recipe_constraints.push(constraint!(*var == var_value));
     }
 
     println!("Successfully crafted the target item!");
-    println!("Final target item count: {}", final_target_count);
 
     println!("\nRecipe usage breakdown:");
-    let mut used_any = false;
-    for (i, uses) in final_uses.iter().enumerate() {
-        if *uses > 0 {
-            println!("- {}: {}", recipes[i].name(), uses);
-            used_any = true;
-        }
-    }
-    if !used_any {
-        println!("- No recipes needed!");
+    for recipe in &recipes {
+        let var = recipe_to_variable.get(recipe).unwrap();
+        let var_value = solution.value(*var);
+        if var_value == 0.0 {continue;}
+        println!("- {}: {}", recipe.name(), var_value);
     }
 
-    println!("\nRemaining inventory:");
-    for (item_id, count) in final_inventory {
-        println!("- {}: {}", item_name(item_id), count);
+    println!("\nFinal inventory:");
+    for item in &relevant_item_ids {
+        let final_val = item_expressions.get(item).unwrap().eval_with(&solution);
+        if final_val == 0.0 {continue;}
+        println!("- {}: {}", item_name(*item), final_val);
     }
-    
 }
