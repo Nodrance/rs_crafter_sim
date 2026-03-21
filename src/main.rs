@@ -132,6 +132,21 @@ impl Recipe {
     }
 }
 
+struct CraftingSolution {
+    recipe_values: HashMap<Recipe, f64>,
+    final_inventory_values: HashMap<ItemId, f64>,
+    relevant_item_ids: Vec<ItemId>,
+}
+impl CraftingSolution {
+    fn recipe_value(&self, recipe: &Recipe) -> f64 {
+        self.recipe_values.get(recipe).copied().unwrap_or(0.0)
+    }
+
+    fn final_inventory(&self, item_id: ItemId) -> f64 {
+        self.final_inventory_values.get(&item_id).copied().unwrap_or(0.0)
+    }
+}
+
 fn sort_and_prune_recipes(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, std::collections::HashSet<ItemId>) {
     // Each item inherits the best priority key of any recipe that produces it
     // Each recipe inherits the priority key of its best output item type, plus its own base priority
@@ -206,40 +221,7 @@ fn sort_and_prune_recipes(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe
     (recipes, relevant_item_ids)
 }
 
-fn main() {
-    // Inputs (higher priority will be preferred):
-    let recipes = vec![
-        // One cobblestone into one gravel, priority 0
-        Recipe::new_single(
-            COBBLESTONE_ID, 1, 
-            GRAVEL_ID, 1,
-            0),
-        Recipe::new_single(
-            GRAVEL_ID, 2,
-            SAND_ID, 1,
-            10),
-        // one sand and one cobbleston into 2 glass, priority 10
-        Recipe::new(
-            vec![(SAND_ID, 1), (COBBLESTONE_ID, 1)],
-            vec![(GLASS_ID, 2)],
-            10
-        ),
-        Recipe::new_single(
-            COBBLESTONE_ID, 10,
-            GLASS_ID, 9,
-            5),
-        // 1 cobblestone into 2 cobblestone and a diamond, negative 100000 priority
-        Recipe::new(
-            vec![(COBBLESTONE_ID, 1)],
-            vec![(COBBLESTONE_ID, 2), (DIAMOND_ID, 1)],
-            -100000
-        )
-    ];
-    let starting_items = ItemSet::new(vec![
-        (COBBLESTONE_ID, 1)
-    ]);
-    let target = ItemSet::new(vec![(GLASS_ID, 11)]);
-
+fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> CraftingSolution {
     let (recipes, relevant_item_ids) = sort_and_prune_recipes(recipes, &target);
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
@@ -281,20 +263,92 @@ fn main() {
         recipe_constraints.push(constraint!(*var == var_value));
     }
 
+    let mut recipe_values = HashMap::new();
+    for recipe in &recipes {
+        if let Some(var) = recipe_to_variable.get(recipe) {
+            recipe_values.insert(recipe.clone(), solution.value(*var));
+        }
+    }
+
+    let mut final_inventory_values = HashMap::new();
+    for item_id in &relevant_item_ids {
+        if let Some(expr) = item_expressions.get(item_id) {
+            final_inventory_values.insert(*item_id, expr.eval_with(&solution));
+        }
+    }
+
+    let mut relevant_item_ids = relevant_item_ids.into_iter().collect::<Vec<_>>();
+    relevant_item_ids.sort_unstable();
+
+    CraftingSolution {
+        recipe_values,
+        final_inventory_values,
+        relevant_item_ids,
+    }
+}
+
+fn main() {
+    let recipes = get_recipes();
+    let starting_items = get_starting_items();
+    let target = get_target();
+
+    let solution = calculate_solution(recipes.clone(), starting_items.clone(), target.clone());
+    
     println!("Successfully crafted the target item!");
 
     println!("\nRecipe usage breakdown:");
     for recipe in &recipes {
-        let var = recipe_to_variable.get(recipe).unwrap();
-        let var_value = solution.value(*var);
+        let var_value = solution.recipe_value(recipe);
         if var_value == 0.0 {continue;}
         println!("- {}: {}", recipe.name(), var_value);
     }
 
     println!("\nFinal inventory:");
-    for item in &relevant_item_ids {
-        let final_val = item_expressions.get(item).unwrap().eval_with(&solution);
+    for item in &solution.relevant_item_ids {
+        let final_val = solution.final_inventory(*item);
         if final_val == 0.0 {continue;}
         println!("- {}: {}", item_name(*item), final_val);
     }
+}
+
+// ##########
+// EDIT THESE
+// ##########
+
+fn get_recipes() -> Vec<Recipe> {
+    vec![
+        // One cobblestone into one gravel, priority 0
+        Recipe::new_single(
+            COBBLESTONE_ID, 1, 
+            GRAVEL_ID, 1,
+            0),
+        Recipe::new_single(
+            GRAVEL_ID, 2,
+            SAND_ID, 1,
+            10),
+        // one sand and one cobbleston into 2 glass, priority 10
+        Recipe::new(
+            vec![(SAND_ID, 1), (COBBLESTONE_ID, 1)],
+            vec![(GLASS_ID, 2)],
+            10),
+        Recipe::new_single(
+            COBBLESTONE_ID, 10,
+            GLASS_ID, 9,
+            5),
+        // 1 cobblestone into 2 cobblestone and a diamond, -100000 priority
+        Recipe::new(
+            vec![(COBBLESTONE_ID, 1)],
+            vec![(COBBLESTONE_ID, 2), (DIAMOND_ID, 1)],
+            -100000),
+    ]
+}
+
+fn get_starting_items() -> ItemSet {
+    ItemSet::new(vec![
+        (COBBLESTONE_ID, 1)
+    ])
+}
+
+fn get_target() -> ItemSet {
+    ItemSet::new(vec![(GLASS_ID, 11)])
 }
