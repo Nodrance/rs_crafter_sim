@@ -65,7 +65,7 @@ impl RecipePriorityKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct Recipe{
     unique_id: usize,
     input: ItemSet,
@@ -73,6 +73,12 @@ struct Recipe{
     base_priority: isize,
     effective_priority: Option<isize>,
 }
+impl PartialEq for Recipe {
+    fn eq(&self, other: &Self) -> bool {
+        self.unique_id == other.unique_id
+    }
+}
+impl Eq for Recipe {}
 impl Hash for Recipe {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.unique_id.hash(state);
