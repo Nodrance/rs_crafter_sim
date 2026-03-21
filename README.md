@@ -7,5 +7,5 @@
 I know about these already:
 1. If a recipe has multiple outputs then one of them will have a borked priority that's too high
 2. It doesn't check if you can start loops. If you have something like 1->2 cobblestone, it'll say "okay great that's the same as 0->1, so just make a cobble out of thin air
-3. If you can't make the target it will throw an error instead of telling you what you'd need to get in order to make it. That's the next step
+3. When it tells you what you'll need to add to make the item you requested, it assumes highest priority recipes, and doesn't account for lower priority more efficient recipe paths. This is because we're assuming that the player will always want to use the highest priority path (ie they'd rather you tell them "add one more iron block to make an ingot" than "add 9 more nuggets to make an ingot" if they have the block recipe set as higher priority than the nugget recipe). This means that if a high efficiency low priority path exists, it will be ignored and you might be able to add less than the crafting plan says.
 If you find anything else let me know and I'll add it to the list

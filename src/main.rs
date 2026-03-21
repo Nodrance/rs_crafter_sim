@@ -1,4 +1,4 @@
-use std::{cmp, collections::HashMap, hash::Hash, ops::Index};
+use std::{cmp, collections::{HashMap, HashSet}, hash::Hash, ops::Index};
 use good_lp::{Expression, ProblemVariables, Solution, SolverModel, constraint, default_solver, variable};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -153,7 +153,7 @@ impl CraftingSolution {
     }
 }
 
-fn sort_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, std::collections::HashSet<ItemId>) {
+fn sort_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, HashSet<ItemId>) {
     // Each item inherits the best priority key of any recipe that produces it
     // Each recipe inherits the priority key of its best output item type, plus its own base priority
     // This continues until it stabilizes (because loops are possible but will never result in a better key)
@@ -214,7 +214,7 @@ fn sort_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, target: &Item
 
     // Take all the item types that are used by those recipes as inputs or outputs, to get the final list of relevant item types (unsorted)
     // This means byproducts are also tracked by the system so they can be shown in the crafting plan
-    let mut relevant_item_ids = std::collections::HashSet::new();
+    let mut relevant_item_ids = HashSet::new();
     for recipe in &recipes {
         for item_id in recipe.output.items.keys() {
             relevant_item_ids.insert(*item_id);
@@ -225,6 +225,133 @@ fn sort_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, target: &Item
     }
     
     (recipes, relevant_item_ids)
+}
+
+fn find_items_with_no_recipes(recipes: &[Recipe], relevant_item_ids: &HashSet<ItemId>) -> HashSet<ItemId> {
+    relevant_item_ids
+        .iter()
+        .copied()
+        .filter(|item_id| !recipes.iter().any(|recipe| recipe.output[*item_id] > 0))
+        .collect()
+}
+
+fn filter_highest_priority_recipes_per_item(recipes: &[Recipe]) -> Vec<Recipe> {
+    let mut sorted = recipes.to_vec();
+    sorted.sort_by_key(|recipe| recipe.effective_priority.unwrap_or(isize::MAX));
+
+    let mut seen_output_items = HashSet::new();
+    let mut selected_recipe_ids = HashSet::new();
+
+    for recipe in &sorted {
+        let produces_new_item = recipe
+            .output
+            .items
+            .keys()
+            .any(|item_id| !seen_output_items.contains(item_id));
+
+        if !produces_new_item {
+            continue;
+        }
+
+        selected_recipe_ids.insert(recipe.unique_id);
+        for item_id in recipe.output.items.keys() {
+            seen_output_items.insert(*item_id);
+        }
+    }
+
+    sorted
+        .into_iter()
+        .filter(|recipe| selected_recipe_ids.contains(&recipe.unique_id))
+        .collect()
+}
+
+fn get_required_items(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> ItemSet {
+    let (recipes, pruned_relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
+    let recipes = filter_highest_priority_recipes_per_item(&recipes);
+
+    let mut relevant_item_ids = HashSet::new();
+    for item_id in target.items.keys() {
+        relevant_item_ids.insert(*item_id);
+    }
+    for recipe in &recipes {
+        for item_id in recipe.input.items.keys() {
+            relevant_item_ids.insert(*item_id);
+        }
+        for item_id in recipe.output.items.keys() {
+            relevant_item_ids.insert(*item_id);
+        }
+    }
+    for item_id in &pruned_relevant_item_ids {
+        relevant_item_ids.insert(*item_id);
+    }
+
+    let items_with_no_recipes = find_items_with_no_recipes(&recipes, &relevant_item_ids);
+
+    let mut recipe_to_variable = HashMap::new();
+    let mut problem_variables = ProblemVariables::new();
+    for recipe in &recipes {
+        let var = problem_variables.add(variable().integer().min(0).name(recipe.name()));
+        recipe_to_variable.insert(recipe.clone(), var);
+    }
+
+    let mut item_expressions = HashMap::with_capacity(relevant_item_ids.len());
+    let mut item_constraints = Vec::new();
+    for item in &relevant_item_ids {
+        let mut constraint_expr = Expression::from(starting_items[*item] as i32);
+        for recipe in recipes.iter() {
+            let output_count = recipe.output[*item] as i32;
+            let input_count = recipe.input[*item] as i32;
+            let var = recipe_to_variable.get(recipe).expect("A recipe is being used in get_required_items that has no variable attached");
+            constraint_expr = constraint_expr + output_count * *var - input_count * *var;
+        }
+
+        item_expressions.insert(*item, constraint_expr.clone());
+
+        if !items_with_no_recipes.contains(item) {
+            item_constraints.push(constraint!(constraint_expr >= target[*item] as i32));
+        }
+    }
+
+    let mut recipe_constraints = Vec::new();
+    let mut solution = problem_variables
+        .clone()
+        .minimise(0)
+        .using(default_solver)
+        .with_all(item_constraints.clone())
+        .with_all(recipe_constraints.clone())
+        .solve()
+        .expect("Could not solve relaxed required-items model");
+
+    for recipe in &recipes {
+        let var = recipe_to_variable
+            .get(recipe)
+            .expect("A recipe is being minimized in get_required_items that has no variable attached");
+        solution = problem_variables
+            .clone()
+            .minimise(*var)
+            .using(default_solver)
+            .with_all(item_constraints.clone())
+            .with_all(recipe_constraints.clone())
+            .solve()
+            .expect("Could not solve relaxed required-items model while minimizing recipe usage");
+
+        let var_value = solution.value(*var);
+        recipe_constraints.push(constraint!(*var == var_value));
+    }
+
+    let mut required = ItemSet::new(vec![]);
+    for item_id in &items_with_no_recipes {
+        let final_inventory = item_expressions
+            .get(item_id)
+            .expect("Missing expression for non-producible item in get_required_items")
+            .eval_with(&solution);
+        let needed = (target[*item_id] as f64 - final_inventory).ceil().max(0.0) as usize;
+        if needed > 0 {
+            required.add(*item_id, needed);
+        }
+    }
+
+    required
 }
 
 fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> CraftingSolution {
@@ -299,7 +426,12 @@ fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: Ite
 }
 
 fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> usize {
-        let (recipes, relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
+    let (recipes, relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
+    let target_item_id = *target
+        .items
+        .keys()
+        .next()
+        .expect("Target item set is empty in calculate_max");
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
     for recipe in &recipes {
@@ -321,14 +453,19 @@ fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet)
         item_constraints.push(constraint!(constraint_expr >= target[*item] as i32));
     }
 
-    let objective = item_expressions.get(&target[0]).expect("A target item is being used in the calculate max function that has no expression attached");
+    let objective = item_expressions
+        .get(&target_item_id)
+        .expect("A target item is being used in the calculate max function that has no expression attached");
     let solution = problem_variables.clone()
         .maximise(objective.clone())
         .using(default_solver)
         .with_all(item_constraints.clone())
-        .solve().expect("It's impossible to craft the target items with the provided recipes and starting items");
+        .solve();
+    if solution.is_err() {
+        return 0;
+    }
 
-    let result = objective.eval_with(&solution) - starting_items[target[0]] as f64;
+    let result = objective.eval_with(&solution.unwrap()) - starting_items[target_item_id] as f64;
     if result.fract() != 0.0 {
         panic!("Solution is somehow not an integer: {}", result);
     }
@@ -344,6 +481,15 @@ fn main() {
     println!("Maximum number of first target item that can be crafted: {}", max);
     if max == 0 {
         println!("No solution found, cannot craft any of the target items with the provided recipes and starting items.");
+        let required_items = get_required_items(recipes, starting_items, target);
+        if required_items.items.is_empty() {
+            println!("No additional base items identified by relaxed solve.");
+        } else {
+            println!("Required items to add to starting inventory:");
+            for (item_id, count) in required_items.items {
+                println!("- {}: {}", item_name(item_id), count);
+            }
+        }
         return;
     }
     let solution = calculate_solution(recipes.clone(), starting_items.clone(), target.clone());
@@ -365,9 +511,23 @@ fn main() {
     }
 }
 
-// ##########
-// EDIT THESE
-// ##########
+// ⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠰⣮⡫⢮⣔⢄⢠⡀⠀⠀⠀⢆⣾⣥⣾⡞⠏⣂⠁⠒⡛⠠⠤⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡀⠠⠀⠄⠂⡄
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣻⣿⣶⣏⣧⡺⡑⠀⣀⡜⣽⣿⣿⠷⢋⠩⠤⠬⠗⠂⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⠐⠠⠁⠂⠡⠀
+// ⢀⠂⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠒⠪⠷⡿⣿⣿⣴⣡⢫⡰⣼⡿⡿⣳⠦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+// ⡌⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣴⣿⣿⣿⣿⣾⡿⠋⠉⠩⡉⣣⣍⢄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠄⠂
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⣿⣇⡏⣀⣭⢨⡀⢷⡈⢆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⡐⠡
+// ⠤⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠰⣿⣿⣿⣿⣿⣽⣽⣿⣿⣾⣿⡿⠙⠈⣟⡿⡀⠀⠀⠀⠀⠀Edit This⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠁
+// ⠀⠀⠀⠉⠁⠒⠀⠤⠀⢀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⢹⣿⣿⣿⣿⣿⣯⣌⠙⠛⢠⣶⣧⣩⠾⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⠀⠀⠀⠀⡄⢃
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⣿⣿⣿⣿⣿⣿⣿⣿⣋⣙⡢⢄⠭⣽⢩⢟⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠂⠁⠄⡀⠀⠠⢡⠘⡄
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣷⣾⣿⣿⣿⣿⣛⠉⠉⠉⠉⢹⣿⣷⢽⠀⡿⣫⢀⠄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⠂⡉⠐⡀⠆⡡⢂⡑⢢
+// ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⣿⣿⣿⣿⣿⣿⣶⣐⣀⣤⢲⣾⡟⢉⡾⢘⣯⡾⣷⣚⠢⡆⠔⠀⠀⠀⠀⠀⠀⠀⠀⢀⠀⠐⡀⠂⠄⡑⢄⠱⣀⠣⢌⡅
+// ⢀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠐⠲⠵⣻⣿⣿⣿⣿⣿⣿⣿⡏⠀⣎⢸⡓⢀⠞⣤⣿⡿⢳⣕⡲⠞⠀⠀⠀⠀⠀⠀⠀⠀⠀⠌⠀⠄⠡⢀⡑⢈⠔⣈⠒⣄⠣⢎⡰
+// ⠀⠠⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣴⣾⣿⣿⣿⣿⣿⣿⣿⣿⣷⣦⣇⣼⣤⣴⣿⣿⣿⠇⠀⢟⣏⣁⡚⠂⠀⠀⠀⡀⢀⠂⢀⠀⠡⢈⠐⢂⠄⢣⠘⡄⢣⠜⡌⢦⡑
+// ⠈⠄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠴⠦⠶⢿⣿⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⠁⠀⡀⠫⣁⡀⣀⠀⠀⢁⠠⠀⠌⡀⢂⡐⠀⠈⠂⠜⣠⠣⠜⣡⠚⡜⡢⠍
+// ⠌⠠⢈⠐⡀⠀⠀⠀⠀⠠⠀⠂⠀⢀⢂⡆⡀⡠⣲⣽⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠟⢹⣿⣿⣟⢟⣯⣬⣭⣾⡿⠏⢢⣷⣈⠀⠄⡁⢆⠘⡠⢐⠡⠂⠀⠈⠤⢣⡙⣤⢋⠔⢡⢚
+// ⢌⠰⢀⠢⠐⠡⢀⠀⠄⡁⠂⣀⠔⣱⣎⢁⣫⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡏⠀⡜⣻⣽⣾⣿⣿⣿⡿⠟⠁⣀⢾⡟⢈⢷⠠⡐⢌⠢⡑⢌⡒⡡⠀⠀⢈⣇⠺⡔⡃⢠⢇⢯
+// ⢢⠘⡠⢑⠨⡁⢂⠌⣐⠤⣕⣥⣾⡏⠰⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣞⣿⣿⠁⢐⢨⣿⣿⣿⣿⡿⠏⢡⢄⣴⣿⡏⢠⣿⣏⠱⢌⠄⠣⢌⣷⣰⡅⠂⠀⠢⣌⠳⠜⠡⡘⣎⡞
+// ⢆⢣⢐⣃⢦⠱⠊⣨⣀⣾⣿⣿⣿⡿⡷⠄⠛⠻⠿⣿⣿⣿⣿⣿⣿⣿⣿⣯⢿⣿⠀⡸⣿⣿⣿⣿⠟⠁⣴⣵⣿⠟⠁⣀⣼⡿⠉⣿⡀⠙⠗⡚⡁⠁⠠⡀⠀⠀⠀⠡⠈⠤⠑⡜⠜
 
 fn get_recipes() -> Vec<Recipe> {
     vec![
@@ -390,16 +550,16 @@ fn get_recipes() -> Vec<Recipe> {
             GLASS_ID, 9,
             5),
         // 1 cobblestone into 2 cobblestone and a diamond, -100000 priority
-        Recipe::new(
-            vec![(COBBLESTONE_ID, 1)],
-            vec![(COBBLESTONE_ID, 2), (DIAMOND_ID, 1)],
-            -100000),
+        // Recipe::new(
+        //     vec![(COBBLESTONE_ID, 1)],
+        //     vec![(COBBLESTONE_ID, 2), (DIAMOND_ID, 1)],
+        //     -100000),
     ]
 }
 
 fn get_starting_items() -> ItemSet {
     ItemSet::new(vec![
-    (COBBLESTONE_ID, 1),
+    (COBBLESTONE_ID, 20),
     ])
 }
 
