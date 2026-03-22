@@ -2,6 +2,35 @@ use std::collections::{HashMap, HashSet};
 
 use crate::crafting_domain::{ItemId, ItemSet, Recipe, RecipePriorityKey};
 
+pub fn collect_relevant_item_ids(
+    recipes: &[Recipe],
+    target: &ItemSet,
+    extra_item_ids: &HashSet<ItemId>,
+) -> HashSet<ItemId> {
+    // Collects all item ids relevant to solving: target items, recipe inputs/outputs, and caller-provided extras.
+    // Returns a deduplicated set used for expression and constraint construction.
+    let mut relevant_item_ids = HashSet::new();
+
+    for item_id in target.items.keys() {
+        relevant_item_ids.insert(*item_id);
+    }
+
+    for recipe in recipes {
+        for item_id in recipe.output.items.keys() {
+            relevant_item_ids.insert(*item_id);
+        }
+        for item_id in recipe.input.items.keys() {
+            relevant_item_ids.insert(*item_id);
+        }
+    }
+
+    for item_id in extra_item_ids {
+        relevant_item_ids.insert(*item_id);
+    }
+
+    relevant_item_ids
+}
+
 pub fn prioritize_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, HashSet<ItemId>) {
     // Traverses backward from target outputs to keep only recipes/items that can influence them.
     // Assigns each retained recipe an effective priority rank derived from best discovered route keys.

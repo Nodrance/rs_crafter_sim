@@ -4,14 +4,15 @@ use std::{
 };
 
 use good_lp::{
-    Expression, ProblemVariables, Solution, SolverModel, constraint, default_solver, variable,
+    Constraint, Expression, ProblemVariables, Solution, SolverModel, Variable, constraint,
+    default_solver, variable,
 };
 
 use crate::{
-    crafting_domain::{CraftingSolution, ItemSet, Recipe, MAX_RECIPE_VALUE},
+    crafting_domain::{CraftingSolution, ItemId, ItemSet, Recipe, MAX_RECIPE_VALUE},
     execution_planner::build_executable_plan_from_recipe_usage,
     recipe_analysis::{
-        collect_non_producible_items, detect_recipe_cycles,
+        collect_non_producible_items, collect_relevant_item_ids, detect_recipe_cycles,
         prioritize_and_prune_relevant_recipes_and_items,
         select_top_priority_recipes_per_output_item,
     },
@@ -19,6 +20,125 @@ use crate::{
 
 type ExecutablePlan = Vec<(Recipe, usize)>;
 type DisabledRecipeIdSet = HashSet<usize>;
+
+enum RecipeVariableMode<'a> {
+    Unbounded,
+    DisabledAtZero(&'a HashSet<usize>),
+    Capped(i32),
+}
+
+fn build_recipe_variables(
+    recipes: &[Recipe],
+    mode: RecipeVariableMode,
+) -> (ProblemVariables, HashMap<usize, Variable>) {
+    // Creates one LP integer variable per recipe with mode-specific bounds.
+    // Returns both the variable registry and a recipe-id to variable lookup map.
+    let mut recipe_to_variable = HashMap::new();
+    let mut problem_variables = ProblemVariables::new();
+
+    for recipe in recipes {
+        let var = match mode {
+            RecipeVariableMode::Unbounded => {
+                problem_variables.add(variable().integer().min(0).name(recipe.describe()))
+            }
+            RecipeVariableMode::DisabledAtZero(disabled_recipe_ids) => {
+                if disabled_recipe_ids.contains(&recipe.unique_id) {
+                    problem_variables
+                        .add(variable().integer().min(0).max(0).name(recipe.describe()))
+                } else {
+                    problem_variables.add(variable().integer().min(0).name(recipe.describe()))
+                }
+            }
+            RecipeVariableMode::Capped(max_value) => problem_variables.add(
+                variable()
+                    .integer()
+                    .min(0)
+                    .max(max_value)
+                    .name(recipe.describe()),
+            ),
+        };
+        recipe_to_variable.insert(recipe.unique_id, var);
+    }
+
+    (problem_variables, recipe_to_variable)
+}
+
+fn build_item_flow_expressions_and_constraints<F>(
+    recipes: &[Recipe],
+    relevant_item_ids: &HashSet<ItemId>,
+    starting_items: &ItemSet,
+    target: &ItemSet,
+    recipe_to_variable: &HashMap<usize, Variable>,
+    missing_variable_message: &str,
+    should_constrain_item: F,
+) -> (HashMap<ItemId, Expression>, Vec<Constraint>)
+where
+    F: Fn(ItemId) -> bool,
+{
+    // Builds per-item inventory flow expressions and target constraints.
+    // Item constraints are emitted only for item ids accepted by `should_constrain_item`.
+    let mut item_expressions = HashMap::with_capacity(relevant_item_ids.len());
+    let mut item_constraints = Vec::new();
+
+    for item in relevant_item_ids {
+        let mut constraint_expr = Expression::from(starting_items[*item] as i32);
+        for recipe in recipes {
+            let output_count = recipe.output[*item] as i32;
+            let input_count = recipe.input[*item] as i32;
+            let var = recipe_to_variable
+                .get(&recipe.unique_id)
+                .expect(missing_variable_message);
+            constraint_expr = constraint_expr + output_count * *var - input_count * *var;
+        }
+
+        item_expressions.insert(*item, constraint_expr.clone());
+
+        if should_constrain_item(*item) {
+            item_constraints.push(constraint!(constraint_expr >= target[*item] as i32));
+        }
+    }
+
+    (item_expressions, item_constraints)
+}
+
+fn lock_recipe_usages_in_priority_order(
+    recipes: &[Recipe],
+    problem_variables: &ProblemVariables,
+    recipe_to_variable: &HashMap<usize, Variable>,
+    item_constraints: &[Constraint],
+    mut on_lock: impl FnMut(&Recipe, f64),
+) -> Option<Vec<Constraint>> {
+    // Solves lexicographically: minimizes each recipe usage in recipe order while locking prior values.
+    // Returns the resulting equality constraints that pin recipe variables to chosen usage values.
+    let mut recipe_constraints = Vec::new();
+
+    problem_variables
+        .clone()
+        .minimise(0)
+        .using(default_solver)
+        .with_all(item_constraints.to_vec())
+        .with_all(recipe_constraints.clone())
+        .solve()
+        .ok()?;
+
+    for recipe in recipes {
+        let var = recipe_to_variable.get(&recipe.unique_id)?;
+        let solution = problem_variables
+            .clone()
+            .minimise(*var)
+            .using(default_solver)
+            .with_all(item_constraints.to_vec())
+            .with_all(recipe_constraints.clone())
+            .solve()
+            .ok()?;
+
+        let var_value = solution.value(*var);
+        recipe_constraints.push(constraint!(*var == var_value));
+        on_lock(recipe, var_value);
+    }
+
+    Some(recipe_constraints)
+}
 
 pub fn compute_required_base_items(
     recipes: Vec<Recipe>,
@@ -31,53 +151,40 @@ pub fn compute_required_base_items(
         prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
     let recipes = select_top_priority_recipes_per_output_item(&recipes);
 
-    let mut relevant_item_ids = HashSet::new();
-    for item_id in target.items.keys() {
-        relevant_item_ids.insert(*item_id);
-    }
-    for recipe in &recipes {
-        for item_id in recipe.input.items.keys() {
-            relevant_item_ids.insert(*item_id);
-        }
-        for item_id in recipe.output.items.keys() {
-            relevant_item_ids.insert(*item_id);
-        }
-    }
-    for item_id in &pruned_relevant_item_ids {
-        relevant_item_ids.insert(*item_id);
-    }
+    let relevant_item_ids = collect_relevant_item_ids(&recipes, &target, &pruned_relevant_item_ids);
 
     let items_with_no_recipes = collect_non_producible_items(&recipes, &relevant_item_ids);
 
-    let mut recipe_to_variable = HashMap::new();
-    let mut problem_variables = ProblemVariables::new();
-    for recipe in &recipes {
-        let var = problem_variables.add(variable().integer().min(0).name(recipe.describe()));
-        recipe_to_variable.insert(recipe.clone(), var);
-    }
+    println!(
+        "Relaxed deficit analysis is using {} recipes and {} relevant items ({} with no recipes).",
+        recipes.len(),
+        relevant_item_ids.len(),
+        items_with_no_recipes.len()
+    );
 
-    let mut item_expressions = HashMap::with_capacity(relevant_item_ids.len());
-    let mut item_constraints = Vec::new();
-    for item in &relevant_item_ids {
-        let mut constraint_expr = Expression::from(starting_items[*item] as i32);
-        for recipe in &recipes {
-            let output_count = recipe.output[*item] as i32;
-            let input_count = recipe.input[*item] as i32;
-            let var = recipe_to_variable.get(recipe).expect(
-                "Internal mapping error: recipe variable missing while building base-item constraints",
-            );
-            constraint_expr = constraint_expr + output_count * *var - input_count * *var;
-        }
+    let (problem_variables, recipe_to_variable) =
+        build_recipe_variables(&recipes, RecipeVariableMode::Unbounded);
 
-        item_expressions.insert(*item, constraint_expr.clone());
+    let (item_expressions, item_constraints) = build_item_flow_expressions_and_constraints(
+        &recipes,
+        &relevant_item_ids,
+        &starting_items,
+        &target,
+        &recipe_to_variable,
+        "Internal mapping error: recipe variable missing while building base-item constraints",
+        |item_id| !items_with_no_recipes.contains(&item_id),
+    );
 
-        if !items_with_no_recipes.contains(item) {
-            item_constraints.push(constraint!(constraint_expr >= target[*item] as i32));
-        }
-    }
+    let recipe_constraints = lock_recipe_usages_in_priority_order(
+        &recipes,
+        &problem_variables,
+        &recipe_to_variable,
+        &item_constraints,
+        |_, _| {},
+    )
+    .expect("Relaxed base-item model failed while minimizing recipe usage");
 
-    let mut recipe_constraints = Vec::new();
-    let mut solution = problem_variables
+    let solution = problem_variables
         .clone()
         .minimise(0)
         .using(default_solver)
@@ -85,23 +192,6 @@ pub fn compute_required_base_items(
         .with_all(recipe_constraints.clone())
         .solve()
         .expect("Relaxed base-item deficit model could not be solved");
-
-    for recipe in &recipes {
-        let var = recipe_to_variable.get(recipe).expect(
-            "Internal mapping error: recipe variable missing during usage minimization",
-        );
-        solution = problem_variables
-            .clone()
-            .minimise(*var)
-            .using(default_solver)
-            .with_all(item_constraints.clone())
-            .with_all(recipe_constraints.clone())
-            .solve()
-            .expect("Relaxed base-item model failed while minimizing recipe usage");
-
-        let var_value = solution.value(*var);
-        recipe_constraints.push(constraint!(*var == var_value));
-    }
 
     let mut required = ItemSet::from_item_counts(vec![]);
     for item_id in &items_with_no_recipes {
@@ -134,36 +224,30 @@ fn solve_with_disabled_recipes(
         relevant_item_ids.len()
     );
 
-    let mut recipe_to_variable = HashMap::new();
-    let mut problem_variables = ProblemVariables::new();
-    for recipe in &recipes {
-        let var = if disabled_recipe_ids.contains(&recipe.unique_id) {
-            problem_variables.add(variable().integer().min(0).max(0).name(recipe.describe()))
-        } else {
-            problem_variables.add(variable().integer().min(0).name(recipe.describe()))
-        };
-        recipe_to_variable.insert(recipe.clone(), var);
-    }
+    let (problem_variables, recipe_to_variable) =
+        build_recipe_variables(&recipes, RecipeVariableMode::DisabledAtZero(disabled_recipe_ids));
 
-    let mut item_expressions = HashMap::with_capacity(relevant_item_ids.len());
-    let mut item_constraints = Vec::new();
-    for item in &relevant_item_ids {
-        let mut constraint_expr = Expression::from(starting_items[*item] as i32);
-        for recipe in &recipes {
-            let output_count = recipe.output[*item] as i32;
-            let input_count = recipe.input[*item] as i32;
-            let var = recipe_to_variable.get(recipe).expect(
-                "Internal mapping error: recipe variable missing while building solve constraints",
-            );
-            constraint_expr = constraint_expr + output_count * *var - input_count * *var;
-        }
-        item_expressions.insert(*item, constraint_expr.clone());
-        item_constraints.push(constraint!(constraint_expr >= target[*item] as i32));
-    }
+    let (item_expressions, item_constraints) = build_item_flow_expressions_and_constraints(
+        &recipes,
+        &relevant_item_ids,
+        &starting_items,
+        &target,
+        &recipe_to_variable,
+        "Internal mapping error: recipe variable missing while building solve constraints",
+        |_| true,
+    );
 
-    let mut recipe_constraints = Vec::new();
-    println!("Solving baseline feasible model...");
-    let mut solution = problem_variables
+    println!("Locking recipe usage one variable at a time...");
+    let recipe_constraints = lock_recipe_usages_in_priority_order(
+        &recipes,
+        &problem_variables,
+        &recipe_to_variable,
+        &item_constraints,
+        |recipe, var_value| println!("Locked usage {} for recipe '{}'", var_value, recipe.describe()),
+    )?;
+
+    println!("Re-solving model with locked usages to capture final inventories...");
+    let solution = problem_variables
         .clone()
         .minimise(0)
         .using(default_solver)
@@ -172,28 +256,11 @@ fn solve_with_disabled_recipes(
         .solve()
         .ok()?;
 
-    println!("Baseline model solved. Locking recipe usage one variable at a time...");
-    for recipe in &recipes {
-        let var = recipe_to_variable
-            .get(recipe)
-            .expect("Internal mapping error: LP variable missing during usage locking");
-        solution = problem_variables
-            .clone()
-            .minimise(*var)
-            .using(default_solver)
-            .with_all(item_constraints.clone())
-            .with_all(recipe_constraints.clone())
-            .solve()
-            .ok()?;
-        let var_value = solution.value(*var);
-        recipe_constraints.push(constraint!(*var == var_value));
-        println!("Locked usage {} for recipe '{}'", var_value, recipe.describe());
-    }
     println!("Usage locking complete for this branch.");
 
     let mut recipe_values = HashMap::new();
     for recipe in &recipes {
-        if let Some(var) = recipe_to_variable.get(recipe) {
+        if let Some(var) = recipe_to_variable.get(&recipe.unique_id) {
             recipe_values.insert(recipe.clone(), solution.value(*var));
         }
     }
@@ -340,34 +407,18 @@ pub fn compute_max_craftable_target_amount(
         .next()
         .expect("Target item set is empty in compute_max_craftable_target_amount");
 
-    let mut recipe_to_variable = HashMap::new();
-    let mut problem_variables = ProblemVariables::new();
-    for recipe in &recipes {
-        let var = problem_variables.add(
-            variable()
-                .integer()
-                .min(0)
-                .max(MAX_RECIPE_VALUE)
-                .name(recipe.describe()),
-        );
-        recipe_to_variable.insert(recipe.clone(), var);
-    }
+    let (problem_variables, recipe_to_variable) =
+        build_recipe_variables(&recipes, RecipeVariableMode::Capped(MAX_RECIPE_VALUE));
 
-    let mut item_expressions = HashMap::with_capacity(relevant_item_ids.len());
-    let mut item_constraints = Vec::new();
-    for item in &relevant_item_ids {
-        let mut constraint_expr = Expression::from(starting_items[*item] as i32);
-        for recipe in &recipes {
-            let output_count = recipe.output[*item] as i32;
-            let input_count = recipe.input[*item] as i32;
-            let var = recipe_to_variable.get(recipe).expect(
-                "Internal mapping error: recipe variable missing while building max-objective model",
-            );
-            constraint_expr = constraint_expr + output_count * *var - input_count * *var;
-        }
-        item_expressions.insert(*item, constraint_expr.clone());
-        item_constraints.push(constraint!(constraint_expr >= target[*item] as i32));
-    }
+    let (item_expressions, item_constraints) = build_item_flow_expressions_and_constraints(
+        &recipes,
+        &relevant_item_ids,
+        &starting_items,
+        &target,
+        &recipe_to_variable,
+        "Internal mapping error: recipe variable missing while building max-objective model",
+        |_| true,
+    );
 
     let objective = item_expressions
         .get(&target_item_id)

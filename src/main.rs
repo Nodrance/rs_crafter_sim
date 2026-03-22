@@ -1,17 +1,23 @@
-mod crafting_domain;
-mod crafting_solver;
-mod demo_scenario;
-mod execution_planner;
-mod recipe_analysis;
-
-use crafting_domain::item_display_name;
-use demo_scenario::{
+use rs_crafter_sim::crafting_domain::item_display_name;
+use rs_crafter_sim::demo_scenario::{
     build_demo_recipes, build_demo_starting_items, build_demo_target_items,
 };
-use crafting_solver::{
+use rs_crafter_sim::crafting_solver::{
     compute_max_craftable_target_amount, compute_required_base_items,
     find_executable_solution_via_cycle_elimination,
 };
+
+fn print_required_base_items_report(required_items: rs_crafter_sim::crafting_domain::ItemSet) {
+    // Prints a consistent required-base-items report for fallback/zero-max branches.
+    if required_items.items.is_empty() {
+        println!("Relaxed deficit analysis found no additional non-producible items to add.");
+    } else {
+        println!("Add the following base items to the starting inventory:");
+        for (item_id, count) in required_items.items {
+            println!("- {}: {}", item_display_name(item_id), count);
+        }
+    }
+}
 
 fn main() {
     // Executes the full demo workflow: load scenario data, compute max craftable output,
@@ -26,14 +32,7 @@ fn main() {
     if max == 0 {
         println!("No feasible crafting solution found for the current target and starting inventory.");
         let required_items = compute_required_base_items(recipes, starting_items, target);
-        if required_items.items.is_empty() {
-            println!("Relaxed deficit analysis found no additional non-producible items to add.");
-        } else {
-            println!("Add the following base items to the starting inventory:");
-            for (item_id, count) in required_items.items {
-                println!("- {}: {}", item_display_name(item_id), count);
-            }
-        }
+        print_required_base_items_report(required_items);
         return;
     }
 
@@ -57,14 +56,7 @@ fn main() {
             fallback_recipes.len()
         );
         let required_items = compute_required_base_items(fallback_recipes, starting_items, target);
-        if required_items.items.is_empty() {
-            println!("Relaxed deficit analysis found no additional non-producible items to add.");
-        } else {
-            println!("Add the following base items to the starting inventory:");
-            for (item_id, count) in required_items.items {
-                println!("- {}: {}", item_display_name(item_id), count);
-            }
-        }
+        print_required_base_items_report(required_items);
         return;
     }
 
