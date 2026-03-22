@@ -4,32 +4,40 @@ mod planner;
 mod scenario;
 mod solver;
 
-use domain::item_name;
-use scenario::{get_recipes, get_starting_items, get_target};
-use solver::{calculate_max, find_executable_solution_with_cycle_elimination, get_required_items};
+use domain::item_display_name;
+use scenario::{
+    build_demo_recipes, build_demo_starting_items, build_demo_target_items,
+};
+use solver::{
+    compute_max_craftable_target_amount, compute_required_base_items,
+    find_executable_solution_via_cycle_elimination,
+};
 
 fn main() {
-    let recipes = get_recipes();
-    let starting_items = get_starting_items();
-    let target = get_target();
+    // Runs the end-to-end crafting workflow: load scenario, solve max output,
+    // attempt executable planning with cycle elimination, and print either the
+    // final plan/inventory or fallback required-base-item guidance.
+    let recipes = build_demo_recipes();
+    let starting_items = build_demo_starting_items();
+    let target = build_demo_target_items();
 
-    let max = calculate_max(recipes.clone(), starting_items.clone(), target.clone());
+    let max = compute_max_craftable_target_amount(recipes.clone(), starting_items.clone(), target.clone());
     println!("Maximum number of first target item that can be crafted: {}", max);
     if max == 0 {
         println!("No solution found, cannot craft any of the target items with the provided recipes and starting items.");
-        let required_items = get_required_items(recipes, starting_items, target);
+        let required_items = compute_required_base_items(recipes, starting_items, target);
         if required_items.items.is_empty() {
             println!("No additional base items identified by relaxed solve.");
         } else {
             println!("Required items to add to starting inventory:");
             for (item_id, count) in required_items.items {
-                println!("- {}: {}", item_name(item_id), count);
+                println!("- {}: {}", item_display_name(item_id), count);
             }
         }
         return;
     }
 
-    let executable_or_fallback = find_executable_solution_with_cycle_elimination(
+    let executable_or_fallback = find_executable_solution_via_cycle_elimination(
         recipes.clone(),
         starting_items.clone(),
         target.clone(),
@@ -48,13 +56,13 @@ fn main() {
             "Required-items analysis will use {} recipes after cycle elimination.",
             fallback_recipes.len()
         );
-        let required_items = get_required_items(fallback_recipes, starting_items, target);
+        let required_items = compute_required_base_items(fallback_recipes, starting_items, target);
         if required_items.items.is_empty() {
             println!("No additional base items identified by relaxed solve.");
         } else {
             println!("Required items to add to starting inventory:");
             for (item_id, count) in required_items.items {
-                println!("- {}: {}", item_name(item_id), count);
+                println!("- {}: {}", item_display_name(item_id), count);
             }
         }
         return;
@@ -65,24 +73,24 @@ fn main() {
 
     println!("\nRecipe usage breakdown:");
     for recipe in &recipes {
-        let var_value = solution.recipe_value(recipe);
+        let var_value = solution.recipe_usage_count(recipe);
         if var_value == 0.0 {
             continue;
         }
-        println!("- {}: {}", recipe.name(), var_value);
+        println!("- {}: {}", recipe.describe(), var_value);
     }
 
     println!("\nExecutable recipe plan:");
     for (recipe, count) in plan {
-        println!("- Apply '{}' x{}", recipe.name(), count);
+        println!("- Apply '{}' x{}", recipe.describe(), count);
     }
 
     println!("\nFinal inventory:");
     for item in &solution.relevant_item_ids {
-        let final_val = solution.final_inventory(*item);
+        let final_val = solution.final_inventory_count(*item);
         if final_val == 0.0 {
             continue;
         }
-        println!("- {}: {}", item_name(*item), final_val);
+        println!("- {}: {}", item_display_name(*item), final_val);
     }
 }

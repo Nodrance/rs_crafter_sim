@@ -1,16 +1,20 @@
 use std::collections::HashMap;
 
 use crate::{
-    analysis::find_recipe_loops,
+    analysis::detect_recipe_cycles,
     domain::{ItemSet, Recipe},
 };
 
-pub fn recipe_usage_to_application_plan(
+pub fn build_executable_plan_from_recipe_usage(
     recipes: &[Recipe],
     recipe_values: &HashMap<Recipe, f64>,
     starting_items: &ItemSet,
 ) -> Result<Vec<(Recipe, usize)>, String> {
-    fn max_batch_for_recipe(recipe: &Recipe, inventory: &ItemSet) -> usize {
+    // Converts aggregate recipe usage counts into a valid executable sequence of batched recipe applications.
+    // Uses recursive backtracking to satisfy per-step input availability while honoring usage totals.
+    fn compute_max_affordable_batch(recipe: &Recipe, inventory: &ItemSet) -> usize {
+        // Computes the largest batch of `recipe` that can run with the current inventory.
+        // The limiting reagent among all required inputs determines the max batch.
         let mut max_batch = usize::MAX;
         for (item_id, input_count) in &recipe.input.items {
             if *input_count == 0 {
@@ -22,7 +26,9 @@ pub fn recipe_usage_to_application_plan(
         max_batch
     }
 
-    fn apply_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
+    fn apply_recipe_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
+        // Applies one batched recipe execution by consuming inputs and adding outputs.
+        // Mutates inventory in-place to reflect the new simulated state.
         for (item_id, input_count) in &recipe.input.items {
             let required = input_count * batch;
             let available_entry = inventory.items.entry(*item_id).or_insert(0);
@@ -30,11 +36,13 @@ pub fn recipe_usage_to_application_plan(
         }
 
         for (item_id, output_count) in &recipe.output.items {
-            inventory.add(*item_id, output_count * batch);
+            inventory.add_count(*item_id, output_count * batch);
         }
     }
 
-    fn unapply_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
+    fn rollback_recipe_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
+        // Reverts a previously applied batch during backtracking.
+        // This restores inventory to the exact pre-step state for alternate branch exploration.
         for (item_id, output_count) in &recipe.output.items {
             let produced = output_count * batch;
             let available_entry = inventory.items.entry(*item_id).or_insert(0);
@@ -42,11 +50,13 @@ pub fn recipe_usage_to_application_plan(
         }
 
         for (item_id, input_count) in &recipe.input.items {
-            inventory.add(*item_id, input_count * batch);
+            inventory.add_count(*item_id, input_count * batch);
         }
     }
 
-    fn push_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
+    fn append_or_merge_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
+        // Appends a step to the plan, merging with the previous step when it is the same recipe.
+        // This keeps the resulting plan concise and avoids adjacent duplicates.
         if let Some((last_recipe, last_batch)) = plan.last_mut() {
             if last_recipe.unique_id == recipe.unique_id {
                 *last_batch += batch;
@@ -56,7 +66,9 @@ pub fn recipe_usage_to_application_plan(
         plan.push((recipe.clone(), batch));
     }
 
-    fn pop_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
+    fn remove_or_shrink_last_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
+        // Undoes the latest plan append/merge operation.
+        // Used to keep plan state consistent with inventory when backtracking.
         if let Some((last_recipe, last_batch)) = plan.last_mut() {
             if last_recipe.unique_id == recipe.unique_id {
                 if *last_batch == batch {
@@ -68,7 +80,7 @@ pub fn recipe_usage_to_application_plan(
         }
     }
 
-    fn backsolve_plan(
+    fn recursively_backsolve_plan(
         recipes: &[Recipe],
         in_loop_by_id: &HashMap<usize, bool>,
         remaining_counts: &mut HashMap<usize, usize>,
@@ -76,6 +88,8 @@ pub fn recipe_usage_to_application_plan(
         total_remaining: usize,
         plan: &mut Vec<(Recipe, usize)>,
     ) -> bool {
+        // Tries to complete all remaining recipe usages by DFS/backtracking over feasible batches.
+        // Candidate ordering prioritizes loop-involved and high-impact batches to reduce dead ends.
         if total_remaining == 0 {
             return true;
         }
@@ -88,7 +102,7 @@ pub fn recipe_usage_to_application_plan(
                     return None;
                 }
 
-                let max_batch = max_batch_for_recipe(recipe, inventory);
+                let max_batch = compute_max_affordable_batch(recipe, inventory);
                 if max_batch == 0 {
                     return None;
                 }
@@ -135,11 +149,11 @@ pub fn recipe_usage_to_application_plan(
                     continue;
                 }
 
-                apply_batch(recipe, batch, inventory);
+                apply_recipe_batch(recipe, batch, inventory);
                 remaining_counts.insert(recipe.unique_id, remaining - batch);
-                push_plan_step(plan, recipe, batch);
+                append_or_merge_plan_step(plan, recipe, batch);
 
-                if backsolve_plan(
+                if recursively_backsolve_plan(
                     recipes,
                     in_loop_by_id,
                     remaining_counts,
@@ -150,9 +164,9 @@ pub fn recipe_usage_to_application_plan(
                     return true;
                 }
 
-                pop_plan_step(plan, recipe, batch);
+                remove_or_shrink_last_plan_step(plan, recipe, batch);
                 remaining_counts.insert(recipe.unique_id, remaining);
-                unapply_batch(recipe, batch, inventory);
+                rollback_recipe_batch(recipe, batch, inventory);
             }
         }
 
@@ -164,7 +178,7 @@ pub fn recipe_usage_to_application_plan(
     for recipe in recipes {
         let raw_value = recipe_values.get(recipe).copied().unwrap_or(0.0);
         if raw_value < 0.0 {
-            return Err(format!("Negative usage count for recipe '{}'", recipe.name()));
+            return Err(format!("Negative usage count for recipe '{}'", recipe.describe()));
         }
 
         let rounded = raw_value.round();
@@ -172,7 +186,7 @@ pub fn recipe_usage_to_application_plan(
             return Err(format!(
                 "Non-integer usage count {} for recipe '{}'",
                 raw_value,
-                recipe.name()
+                recipe.describe()
             ));
         }
 
@@ -182,7 +196,7 @@ pub fn recipe_usage_to_application_plan(
         }
     }
 
-    let (in_loop_by_recipe, _) = find_recipe_loops(recipes);
+    let (in_loop_by_recipe, _) = detect_recipe_cycles(recipes);
     let in_loop_by_id = recipes
         .iter()
         .map(|recipe| {
@@ -197,7 +211,7 @@ pub fn recipe_usage_to_application_plan(
     let total_remaining: usize = remaining_counts.values().sum();
     let mut plan: Vec<(Recipe, usize)> = Vec::new();
 
-    if backsolve_plan(
+    if recursively_backsolve_plan(
         recipes,
         &in_loop_by_id,
         &mut remaining_counts,
@@ -213,7 +227,7 @@ pub fn recipe_usage_to_application_plan(
         .filter_map(|recipe| {
             let remaining = remaining_counts.get(&recipe.unique_id).copied().unwrap_or(0);
             if remaining > 0 {
-                Some(format!("{} (remaining {})", recipe.name(), remaining))
+                Some(format!("{} (remaining {})", recipe.describe(), remaining))
             } else {
                 None
             }

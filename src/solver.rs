@@ -1,19 +1,32 @@
-use std::{cmp, collections::{HashMap, HashSet}};
+use std::{
+    cmp,
+    collections::{HashMap, HashSet},
+};
 
-use good_lp::{Expression, ProblemVariables, Solution, SolverModel, constraint, default_solver, variable};
+use good_lp::{
+    Expression, ProblemVariables, Solution, SolverModel, constraint, default_solver, variable,
+};
 
 use crate::{
     analysis::{
-        filter_highest_priority_recipes_per_item, find_items_with_no_recipes, find_recipe_loops,
-        sort_and_prune_relevant_recipes_and_items,
+        collect_non_producible_items, detect_recipe_cycles,
+        prioritize_and_prune_relevant_recipes_and_items,
+        select_top_priority_recipes_per_output_item,
     },
     domain::{CraftingSolution, ItemSet, Recipe, MAX_RECIPE_VALUE},
-    planner::recipe_usage_to_application_plan,
+    planner::build_executable_plan_from_recipe_usage,
 };
 
-pub fn get_required_items(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> ItemSet {
-    let (recipes, pruned_relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
-    let recipes = filter_highest_priority_recipes_per_item(&recipes);
+pub fn compute_required_base_items(
+    recipes: Vec<Recipe>,
+    starting_items: ItemSet,
+    target: ItemSet,
+) -> ItemSet {
+    // Solves a relaxed model to identify which non-producible items are additionally required.
+    // It minimizes recipe usage in priority order, then computes remaining deficits for base items only.
+    let (recipes, pruned_relevant_item_ids) =
+        prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
+    let recipes = select_top_priority_recipes_per_output_item(&recipes);
 
     let mut relevant_item_ids = HashSet::new();
     for item_id in target.items.keys() {
@@ -31,12 +44,12 @@ pub fn get_required_items(recipes: Vec<Recipe>, starting_items: ItemSet, target:
         relevant_item_ids.insert(*item_id);
     }
 
-    let items_with_no_recipes = find_items_with_no_recipes(&recipes, &relevant_item_ids);
+    let items_with_no_recipes = collect_non_producible_items(&recipes, &relevant_item_ids);
 
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
     for recipe in &recipes {
-        let var = problem_variables.add(variable().integer().min(0).name(recipe.name()));
+        let var = problem_variables.add(variable().integer().min(0).name(recipe.describe()));
         recipe_to_variable.insert(recipe.clone(), var);
     }
 
@@ -44,11 +57,11 @@ pub fn get_required_items(recipes: Vec<Recipe>, starting_items: ItemSet, target:
     let mut item_constraints = Vec::new();
     for item in &relevant_item_ids {
         let mut constraint_expr = Expression::from(starting_items[*item] as i32);
-        for recipe in recipes.iter() {
+        for recipe in &recipes {
             let output_count = recipe.output[*item] as i32;
             let input_count = recipe.input[*item] as i32;
             let var = recipe_to_variable.get(recipe).expect(
-                "A recipe is being used in get_required_items that has no variable attached",
+                "A recipe is being used in compute_required_base_items that has no variable attached",
             );
             constraint_expr = constraint_expr + output_count * *var - input_count * *var;
         }
@@ -71,9 +84,9 @@ pub fn get_required_items(recipes: Vec<Recipe>, starting_items: ItemSet, target:
         .expect("Could not solve relaxed required-items model");
 
     for recipe in &recipes {
-        let var = recipe_to_variable
-            .get(recipe)
-            .expect("A recipe is being minimized in get_required_items that has no variable attached");
+        let var = recipe_to_variable.get(recipe).expect(
+            "A recipe is being minimized in compute_required_base_items that has no variable attached",
+        );
         solution = problem_variables
             .clone()
             .minimise(*var)
@@ -87,41 +100,44 @@ pub fn get_required_items(recipes: Vec<Recipe>, starting_items: ItemSet, target:
         recipe_constraints.push(constraint!(*var == var_value));
     }
 
-    let mut required = ItemSet::new(vec![]);
+    let mut required = ItemSet::from_item_counts(vec![]);
     for item_id in &items_with_no_recipes {
         let final_inventory = item_expressions
             .get(item_id)
-            .expect("Missing expression for non-producible item in get_required_items")
+            .expect("Missing expression for non-producible item in compute_required_base_items")
             .eval_with(&solution);
         let needed = (target[*item_id] as f64 - final_inventory).ceil().max(0.0) as usize;
         if needed > 0 {
-            required.add(*item_id, needed);
+            required.add_count(*item_id, needed);
         }
     }
 
     required
 }
 
-fn calculate_solution_with_disabled_recipes(
+fn solve_with_disabled_recipes(
     recipes: Vec<Recipe>,
     starting_items: ItemSet,
     target: ItemSet,
     disabled_recipe_ids: &HashSet<usize>,
 ) -> Option<CraftingSolution> {
+    // Builds and solves the constrained LP while forcing selected recipe ids to zero usage.
+    // Returns solved recipe usage and final inventory values if the model is feasible.
     println!("Pruning irrelevant recipes and items...");
-    let (recipes, relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
+    let (recipes, relevant_item_ids) = prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
     println!(
         "Setting up linear program with {} variables and {} constraints...",
         recipes.len(),
         relevant_item_ids.len()
     );
+
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
     for recipe in &recipes {
         let var = if disabled_recipe_ids.contains(&recipe.unique_id) {
-            problem_variables.add(variable().integer().min(0).max(0).name(recipe.name()))
+            problem_variables.add(variable().integer().min(0).max(0).name(recipe.describe()))
         } else {
-            problem_variables.add(variable().integer().min(0).name(recipe.name()))
+            problem_variables.add(variable().integer().min(0).name(recipe.describe()))
         };
         recipe_to_variable.insert(recipe.clone(), var);
     }
@@ -130,11 +146,11 @@ fn calculate_solution_with_disabled_recipes(
     let mut item_constraints = Vec::new();
     for item in &relevant_item_ids {
         let mut constraint_expr = Expression::from(starting_items[*item] as i32);
-        for recipe in recipes.iter() {
+        for recipe in &recipes {
             let output_count = recipe.output[*item] as i32;
             let input_count = recipe.input[*item] as i32;
             let var = recipe_to_variable.get(recipe).expect(
-                "A recipe is being used in the calculate solution function that has no variable attached",
+                "A recipe is being used in solve_with_disabled_recipes that has no variable attached",
             );
             constraint_expr = constraint_expr + output_count * *var - input_count * *var;
         }
@@ -152,9 +168,12 @@ fn calculate_solution_with_disabled_recipes(
         .with_all(recipe_constraints.clone())
         .solve()
         .ok()?;
+
     println!("Initial solution found. Locking in recipe usage one by one based on priority...");
     for recipe in &recipes {
-        let var = recipe_to_variable.get(recipe).unwrap();
+        let var = recipe_to_variable
+            .get(recipe)
+            .expect("Missing LP variable while minimizing recipe usage in solve_with_disabled_recipes");
         solution = problem_variables
             .clone()
             .minimise(*var)
@@ -165,7 +184,7 @@ fn calculate_solution_with_disabled_recipes(
             .ok()?;
         let var_value = solution.value(*var);
         recipe_constraints.push(constraint!(*var == var_value));
-        println!("Locked in {} usages for recipe '{}'", var_value, recipe.name());
+        println!("Locked in {} usages for recipe '{}'", var_value, recipe.describe());
     }
     println!("All recipe usages locked in. Final solution found.");
 
@@ -193,11 +212,13 @@ fn calculate_solution_with_disabled_recipes(
     })
 }
 
-pub fn find_executable_solution_with_cycle_elimination(
+pub fn find_executable_solution_via_cycle_elimination(
     recipes: Vec<Recipe>,
     starting_items: ItemSet,
     target: ItemSet,
 ) -> Result<(CraftingSolution, Vec<(Recipe, usize)>), HashSet<usize>> {
+    // Searches for an LP solution whose recipe usages can be executed in valid order.
+    // If a solution is not executable, branches by disabling one recipe from each detected used cycle.
     let mut attempts = vec![HashSet::<usize>::new()];
     let mut visited: HashSet<Vec<usize>> = HashSet::new();
     visited.insert(Vec::new());
@@ -213,7 +234,7 @@ pub fn find_executable_solution_with_cycle_elimination(
             attempt_index, disabled_sorted
         );
 
-        let solution = calculate_solution_with_disabled_recipes(
+        let solution = solve_with_disabled_recipes(
             recipes.clone(),
             starting_items.clone(),
             target.clone(),
@@ -229,9 +250,13 @@ pub fn find_executable_solution_with_cycle_elimination(
             }
             continue;
         }
-        let solution = solution.unwrap();
+        let solution = solution.expect("Solution checked above as Some");
 
-        if let Ok(plan) = recipe_usage_to_application_plan(&recipes, &solution.recipe_values, &starting_items) {
+        if let Ok(plan) = build_executable_plan_from_recipe_usage(
+            &recipes,
+            &solution.recipe_values,
+            &starting_items,
+        ) {
             println!("- Attempt #{} produced an executable plan.", attempt_index);
             return Ok((solution, plan));
         }
@@ -241,7 +266,8 @@ pub fn find_executable_solution_with_cycle_elimination(
             .iter()
             .filter_map(|(recipe, value)| if *value > 0.5 { Some(recipe.clone()) } else { None })
             .collect::<Vec<_>>();
-        let (_, loops) = find_recipe_loops(&used_recipes);
+
+        let (_, loops) = detect_recipe_cycles(&used_recipes);
         if loops.is_empty() {
             println!(
                 "- Attempt #{} had no used loops to eliminate; no more progress from this branch.",
@@ -265,11 +291,9 @@ pub fn find_executable_solution_with_cycle_elimination(
             let recipe_to_disable = loop_route
                 .iter()
                 .max_by(|recipe_a, recipe_b| {
-                    let value_a = solution.recipe_value(recipe_a);
-                    let value_b = solution.recipe_value(recipe_b);
-                    value_a
-                        .partial_cmp(&value_b)
-                        .unwrap_or(cmp::Ordering::Equal)
+                    let value_a = solution.recipe_usage_count(recipe_a);
+                    let value_b = solution.recipe_usage_count(recipe_b);
+                    value_a.partial_cmp(&value_b).unwrap_or(cmp::Ordering::Equal)
                 })
                 .map(|recipe| recipe.unique_id);
 
@@ -299,13 +323,20 @@ pub fn find_executable_solution_with_cycle_elimination(
     Err(best_fallback_disabled_recipe_ids)
 }
 
-pub fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> usize {
-    let (recipes, relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
+pub fn compute_max_craftable_target_amount(
+    recipes: Vec<Recipe>,
+    starting_items: ItemSet,
+    target: ItemSet,
+) -> usize {
+    // Maximizes production of the first target item under inventory-flow constraints.
+    // Returns how many additional units beyond the starting inventory are craftable.
+    let (recipes, relevant_item_ids) = prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
     let target_item_id = *target
         .items
         .keys()
         .next()
-        .expect("Target item set is empty in calculate_max");
+        .expect("Target item set is empty in compute_max_craftable_target_amount");
+
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
     for recipe in &recipes {
@@ -314,7 +345,7 @@ pub fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: Item
                 .integer()
                 .min(0)
                 .max(MAX_RECIPE_VALUE)
-                .name(recipe.name()),
+                .name(recipe.describe()),
         );
         recipe_to_variable.insert(recipe.clone(), var);
     }
@@ -323,11 +354,11 @@ pub fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: Item
     let mut item_constraints = Vec::new();
     for item in &relevant_item_ids {
         let mut constraint_expr = Expression::from(starting_items[*item] as i32);
-        for recipe in recipes.iter() {
+        for recipe in &recipes {
             let output_count = recipe.output[*item] as i32;
             let input_count = recipe.input[*item] as i32;
             let var = recipe_to_variable.get(recipe).expect(
-                "A recipe is being used in the calculate solution function that has no variable attached",
+                "A recipe is being used in compute_max_craftable_target_amount that has no variable attached",
             );
             constraint_expr = constraint_expr + output_count * *var - input_count * *var;
         }
@@ -337,7 +368,8 @@ pub fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: Item
 
     let objective = item_expressions
         .get(&target_item_id)
-        .expect("A target item is being used in the calculate max function that has no expression attached");
+        .expect("A target item is being used in compute_max_craftable_target_amount that has no expression attached");
+
     println!("Solving for maximum number of target items craftable...");
     let solution = problem_variables
         .clone()
@@ -346,11 +378,12 @@ pub fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: Item
         .with_all(item_constraints.clone())
         .solve();
     println!("Solution process complete.");
-    if solution.is_err() {
-        return 0;
-    }
 
-    let result = objective.eval_with(&solution.unwrap()) - starting_items[target_item_id] as f64;
+    let Ok(solution) = solution else {
+        return 0;
+    };
+
+    let result = objective.eval_with(&solution) - starting_items[target_item_id] as f64;
     if result.fract() != 0.0 {
         panic!("Solution is somehow not an integer: {}", result);
     }
