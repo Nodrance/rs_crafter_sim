@@ -1,3 +1,6 @@
+const WORKS_AT_1023: i32 = 1023;
+
+
 use std::{cmp, collections::{HashMap, HashSet}, hash::Hash, ops::Index};
 use good_lp::{Expression, ProblemVariables, Solution, SolverModel, constraint, default_solver, variable};
 use std::collections::hash_map::DefaultHasher;
@@ -425,6 +428,124 @@ fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: Ite
     }
 }
 
+fn recipe_usage_to_application_plan(
+    recipes: &[Recipe],
+    recipe_values: &HashMap<Recipe, f64>,
+    starting_items: &ItemSet,
+) -> Result<Vec<(Recipe, usize)>, String> {
+    println!("Converting recipe usage counts into an executable crafting plan...");
+    let mut remaining_counts: HashMap<usize, usize> = HashMap::new();
+    for recipe in recipes {
+        let raw_value = recipe_values.get(recipe).copied().unwrap_or(0.0);
+        if raw_value < 0.0 {
+            return Err(format!("Negative usage count for recipe '{}'", recipe.name()));
+        }
+
+        let rounded = raw_value.round();
+        if (raw_value - rounded).abs() > 1e-6 {
+            return Err(format!(
+                "Non-integer usage count {} for recipe '{}'",
+                raw_value,
+                recipe.name()
+            ));
+        }
+
+        let count = rounded as usize;
+        if count > 0 {
+            remaining_counts.insert(recipe.unique_id, count);
+        }
+    }
+
+    let mut inventory = starting_items.clone();
+    let mut total_remaining: usize = remaining_counts.values().sum();
+    let mut plan: Vec<(Recipe, usize)> = Vec::new();
+
+    while total_remaining > 0 {
+        let mut made_progress = false;
+
+        for recipe in recipes {
+            let remaining = remaining_counts.get(&recipe.unique_id).copied().unwrap_or(0);
+            if remaining == 0 {
+                continue;
+            }
+
+            let mut max_batch = usize::MAX;
+            for (item_id, input_count) in &recipe.input.items {
+                if *input_count == 0 {
+                    continue;
+                }
+                let available = inventory[*item_id];
+                max_batch = max_batch.min(available / *input_count);
+            }
+
+            if max_batch == 0 {
+                continue;
+            }
+
+            let batch = max_batch.min(remaining);
+            if batch == 0 {
+                continue;
+            }
+
+            for (item_id, input_count) in &recipe.input.items {
+                let required = input_count * batch;
+                let available_entry = inventory.items.entry(*item_id).or_insert(0);
+                if *available_entry < required {
+                    return Err(format!(
+                        "Scheduling bug: recipe '{}' requires {} {} but only {} available",
+                        recipe.name(),
+                        required,
+                        item_name(*item_id),
+                        *available_entry
+                    ));
+                }
+                *available_entry -= required;
+            }
+
+            for (item_id, output_count) in &recipe.output.items {
+                inventory.add(*item_id, output_count * batch);
+            }
+
+            remaining_counts.insert(recipe.unique_id, remaining - batch);
+            total_remaining -= batch;
+
+            if let Some((last_recipe, last_batch)) = plan.last_mut() {
+                if last_recipe.unique_id == recipe.unique_id {
+                    *last_batch += batch;
+                } else {
+                    plan.push((recipe.clone(), batch));
+                }
+            } else {
+                plan.push((recipe.clone(), batch));
+            }
+
+            made_progress = true;
+        }
+
+        if !made_progress {
+            let blocked = recipes
+                .iter()
+                .filter_map(|recipe| {
+                    let remaining = remaining_counts.get(&recipe.unique_id).copied().unwrap_or(0);
+                    if remaining > 0 {
+                        Some(format!("{} (remaining {})", recipe.name(), remaining))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            return Err(format!(
+                "Could not produce a valid execution order with current usage counts. Blocked recipes: {}",
+                blocked
+            ));
+        }
+    }
+
+    Ok(plan)
+}
+
 fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> usize {
     let (recipes, relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
     let target_item_id = *target
@@ -435,7 +556,7 @@ fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet)
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
     for recipe in &recipes {
-        let var = problem_variables.add(variable().integer().min(0).name(recipe.name()));
+        let var = problem_variables.add(variable().integer().min(0).max(i32::MAX-WORKS_AT_1023).name(recipe.name()));
         recipe_to_variable.insert(recipe.clone(), var);
     }
 
@@ -456,11 +577,13 @@ fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet)
     let objective = item_expressions
         .get(&target_item_id)
         .expect("A target item is being used in the calculate max function that has no expression attached");
+    println!("Solving for maximum number of target items craftable...");
     let solution = problem_variables.clone()
         .maximise(objective.clone())
         .using(default_solver)
         .with_all(item_constraints.clone())
         .solve();
+    println!("Solution process complete.");
     if solution.is_err() {
         return 0;
     }
@@ -501,6 +624,18 @@ fn main() {
         let var_value = solution.recipe_value(recipe);
         if var_value == 0.0 {continue;}
         println!("- {}: {}", recipe.name(), var_value);
+    }
+
+    match recipe_usage_to_application_plan(&recipes, &solution.recipe_values, &starting_items) {
+        Ok(plan) => {
+            println!("\nExecutable recipe plan:");
+            for (recipe, count) in plan {
+                println!("- Apply '{}' x{}", recipe.name(), count);
+            }
+        }
+        Err(error) => {
+            println!("\nCould not build executable recipe plan: {}", error);
+        }
     }
 
     println!("\nFinal inventory:");
@@ -549,11 +684,11 @@ fn get_recipes() -> Vec<Recipe> {
             COBBLESTONE_ID, 10,
             GLASS_ID, 9,
             5),
-        // 1 cobblestone into 2 cobblestone and a diamond, -100000 priority
-        // Recipe::new(
-        //     vec![(COBBLESTONE_ID, 1)],
-        //     vec![(COBBLESTONE_ID, 2), (DIAMOND_ID, 1)],
-        //     -100000),
+        // // 1 cobblestone into 2 cobblestone and a diamond, -100000 priority
+        Recipe::new(
+            vec![(COBBLESTONE_ID, 1)],
+            vec![(COBBLESTONE_ID, 2), (DIAMOND_ID, 1)],
+            -100000),
     ]
 }
 

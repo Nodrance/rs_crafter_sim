@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-good_lp = { version = "1.15.0", default-features = false, features = ["microlp"] }
+good_lp = { version = "1.15.0", default-features = false, features = ["highs"] }
+highs = "2.0.0"
