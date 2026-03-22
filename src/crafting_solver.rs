@@ -17,13 +17,16 @@ use crate::{
     },
 };
 
+type ExecutablePlan = Vec<(Recipe, usize)>;
+type DisabledRecipeIdSet = HashSet<usize>;
+
 pub fn compute_required_base_items(
     recipes: Vec<Recipe>,
     starting_items: ItemSet,
     target: ItemSet,
 ) -> ItemSet {
-    // Solves a relaxed model to identify which non-producible items are additionally required.
-    // It minimizes recipe usage in priority order, then computes remaining deficits for base items only.
+    // Solves a relaxed feasibility model to estimate missing non-producible input items.
+    // The solve then lexicographically minimizes recipe usage before calculating base-item deficits.
     let (recipes, pruned_relevant_item_ids) =
         prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
     let recipes = select_top_priority_recipes_per_output_item(&recipes);
@@ -61,7 +64,7 @@ pub fn compute_required_base_items(
             let output_count = recipe.output[*item] as i32;
             let input_count = recipe.input[*item] as i32;
             let var = recipe_to_variable.get(recipe).expect(
-                "A recipe is being used in compute_required_base_items that has no variable attached",
+                "Internal mapping error: recipe variable missing while building base-item constraints",
             );
             constraint_expr = constraint_expr + output_count * *var - input_count * *var;
         }
@@ -81,11 +84,11 @@ pub fn compute_required_base_items(
         .with_all(item_constraints.clone())
         .with_all(recipe_constraints.clone())
         .solve()
-        .expect("Could not solve relaxed required-items model");
+        .expect("Relaxed base-item deficit model could not be solved");
 
     for recipe in &recipes {
         let var = recipe_to_variable.get(recipe).expect(
-            "A recipe is being minimized in compute_required_base_items that has no variable attached",
+            "Internal mapping error: recipe variable missing during usage minimization",
         );
         solution = problem_variables
             .clone()
@@ -94,7 +97,7 @@ pub fn compute_required_base_items(
             .with_all(item_constraints.clone())
             .with_all(recipe_constraints.clone())
             .solve()
-            .expect("Could not solve relaxed required-items model while minimizing recipe usage");
+            .expect("Relaxed base-item model failed while minimizing recipe usage");
 
         let var_value = solution.value(*var);
         recipe_constraints.push(constraint!(*var == var_value));
@@ -104,7 +107,7 @@ pub fn compute_required_base_items(
     for item_id in &items_with_no_recipes {
         let final_inventory = item_expressions
             .get(item_id)
-            .expect("Missing expression for non-producible item in compute_required_base_items")
+            .expect("Internal expression error: missing non-producible item expression")
             .eval_with(&solution);
         let needed = (target[*item_id] as f64 - final_inventory).ceil().max(0.0) as usize;
         if needed > 0 {
@@ -121,12 +124,12 @@ fn solve_with_disabled_recipes(
     target: ItemSet,
     disabled_recipe_ids: &HashSet<usize>,
 ) -> Option<CraftingSolution> {
-    // Builds and solves the constrained LP while forcing selected recipe ids to zero usage.
-    // Returns solved recipe usage and final inventory values if the model is feasible.
-    println!("Pruning irrelevant recipes and items...");
+    // Solves the main crafting model while forcing selected recipe ids to zero usage.
+    // Returns `None` when constraints are infeasible under the current disabled set.
+    println!("Pruning to target-relevant recipes and items...");
     let (recipes, relevant_item_ids) = prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
     println!(
-        "Setting up linear program with {} variables and {} constraints...",
+        "Constructing LP with {} recipe variables and {} item constraints...",
         recipes.len(),
         relevant_item_ids.len()
     );
@@ -150,7 +153,7 @@ fn solve_with_disabled_recipes(
             let output_count = recipe.output[*item] as i32;
             let input_count = recipe.input[*item] as i32;
             let var = recipe_to_variable.get(recipe).expect(
-                "A recipe is being used in solve_with_disabled_recipes that has no variable attached",
+                "Internal mapping error: recipe variable missing while building solve constraints",
             );
             constraint_expr = constraint_expr + output_count * *var - input_count * *var;
         }
@@ -159,7 +162,7 @@ fn solve_with_disabled_recipes(
     }
 
     let mut recipe_constraints = Vec::new();
-    println!("Setting up initial solution...");
+    println!("Solving baseline feasible model...");
     let mut solution = problem_variables
         .clone()
         .minimise(0)
@@ -169,11 +172,11 @@ fn solve_with_disabled_recipes(
         .solve()
         .ok()?;
 
-    println!("Initial solution found. Locking in recipe usage one by one based on priority...");
+    println!("Baseline model solved. Locking recipe usage one variable at a time...");
     for recipe in &recipes {
         let var = recipe_to_variable
             .get(recipe)
-            .expect("Missing LP variable while minimizing recipe usage in solve_with_disabled_recipes");
+            .expect("Internal mapping error: LP variable missing during usage locking");
         solution = problem_variables
             .clone()
             .minimise(*var)
@@ -184,9 +187,9 @@ fn solve_with_disabled_recipes(
             .ok()?;
         let var_value = solution.value(*var);
         recipe_constraints.push(constraint!(*var == var_value));
-        println!("Locked in {} usages for recipe '{}'", var_value, recipe.describe());
+        println!("Locked usage {} for recipe '{}'", var_value, recipe.describe());
     }
-    println!("All recipe usages locked in. Final solution found.");
+    println!("Usage locking complete for this branch.");
 
     let mut recipe_values = HashMap::new();
     for recipe in &recipes {
@@ -216,9 +219,9 @@ pub fn find_executable_solution_via_cycle_elimination(
     recipes: Vec<Recipe>,
     starting_items: ItemSet,
     target: ItemSet,
-) -> Result<(CraftingSolution, Vec<(Recipe, usize)>), HashSet<usize>> {
-    // Searches for an LP solution whose recipe usages can be executed in valid order.
-    // If a solution is not executable, branches by disabling one recipe from each detected used cycle.
+) -> Result<(CraftingSolution, ExecutablePlan), DisabledRecipeIdSet> {
+    // Explores disabled-recipe branches until it finds a solve whose usages are executable in order.
+    // When a branch is non-executable, it disables one high-usage recipe per detected used cycle.
     let mut attempts = vec![HashSet::<usize>::new()];
     let mut visited: HashSet<Vec<usize>> = HashSet::new();
     visited.insert(Vec::new());
@@ -230,7 +233,7 @@ pub fn find_executable_solution_via_cycle_elimination(
         let mut disabled_sorted = disabled_recipe_ids.iter().copied().collect::<Vec<_>>();
         disabled_sorted.sort_unstable();
         println!(
-            "Cycle-elimination attempt #{} with disabled recipe IDs: {:?}",
+            "Cycle-elimination branch #{} with disabled recipe IDs: {:?}",
             attempt_index, disabled_sorted
         );
 
@@ -242,7 +245,7 @@ pub fn find_executable_solution_via_cycle_elimination(
         );
         if solution.is_none() {
             println!(
-                "- Attempt #{} infeasible after disabled set, trying next branch.",
+                "- Branch #{} is infeasible with this disabled set; trying another branch.",
                 attempt_index
             );
             if disabled_recipe_ids.len() > best_fallback_disabled_recipe_ids.len() {
@@ -250,14 +253,14 @@ pub fn find_executable_solution_via_cycle_elimination(
             }
             continue;
         }
-        let solution = solution.expect("Solution checked above as Some");
+        let solution = solution.expect("Branch feasibility was checked before unwrapping solution");
 
         if let Ok(plan) = build_executable_plan_from_recipe_usage(
             &recipes,
             &solution.recipe_values,
             &starting_items,
         ) {
-            println!("- Attempt #{} produced an executable plan.", attempt_index);
+            println!("- Branch #{} produced an executable crafting plan.", attempt_index);
             return Ok((solution, plan));
         }
 
@@ -270,7 +273,7 @@ pub fn find_executable_solution_via_cycle_elimination(
         let (_, loops) = detect_recipe_cycles(&used_recipes);
         if loops.is_empty() {
             println!(
-                "- Attempt #{} had no used loops to eliminate; no more progress from this branch.",
+                "- Branch #{} has no removable used cycles left; this branch is exhausted.",
                 attempt_index
             );
             if disabled_recipe_ids.len() > best_fallback_disabled_recipe_ids.len() {
@@ -280,7 +283,7 @@ pub fn find_executable_solution_via_cycle_elimination(
         }
 
         println!(
-            "- Attempt #{} not executable; found {} used loop routes to branch on.",
+            "- Branch #{} is non-executable; branching on {} detected used cycles.",
             attempt_index,
             loops.len()
         );
@@ -314,12 +317,12 @@ pub fn find_executable_solution_via_cycle_elimination(
         }
 
         println!(
-            "- Attempt #{} spawned {} new cycle-elimination branches.",
+            "- Branch #{} spawned {} follow-up branch(es).",
             attempt_index, spawned_branches
         );
     }
 
-    println!("Cycle-elimination search exhausted all branches with no executable plan.");
+    println!("Cycle-elimination search finished with no executable branch.");
     Err(best_fallback_disabled_recipe_ids)
 }
 
@@ -328,8 +331,8 @@ pub fn compute_max_craftable_target_amount(
     starting_items: ItemSet,
     target: ItemSet,
 ) -> usize {
-    // Maximizes production of the first target item under inventory-flow constraints.
-    // Returns how many additional units beyond the starting inventory are craftable.
+    // Maximizes additional quantity of the first target item under inventory-flow constraints.
+    // Returns the craftable amount above what already exists in starting inventory.
     let (recipes, relevant_item_ids) = prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
     let target_item_id = *target
         .items
@@ -358,7 +361,7 @@ pub fn compute_max_craftable_target_amount(
             let output_count = recipe.output[*item] as i32;
             let input_count = recipe.input[*item] as i32;
             let var = recipe_to_variable.get(recipe).expect(
-                "A recipe is being used in compute_max_craftable_target_amount that has no variable attached",
+                "Internal mapping error: recipe variable missing while building max-objective model",
             );
             constraint_expr = constraint_expr + output_count * *var - input_count * *var;
         }
@@ -368,16 +371,16 @@ pub fn compute_max_craftable_target_amount(
 
     let objective = item_expressions
         .get(&target_item_id)
-        .expect("A target item is being used in compute_max_craftable_target_amount that has no expression attached");
+        .expect("Internal expression error: target item expression missing in max-objective model");
 
-    println!("Solving for maximum number of target items craftable...");
+    println!("Solving max-craft objective for primary target item...");
     let solution = problem_variables
         .clone()
         .maximise(objective.clone())
         .using(default_solver)
         .with_all(item_constraints.clone())
         .solve();
-    println!("Solution process complete.");
+    println!("Max-craft solve completed.");
 
     let Ok(solution) = solution else {
         return 0;
@@ -385,7 +388,7 @@ pub fn compute_max_craftable_target_amount(
 
     let result = objective.eval_with(&solution) - starting_items[target_item_id] as f64;
     if result.fract() != 0.0 {
-        panic!("Solution is somehow not an integer: {}", result);
+        panic!("Solver returned non-integer primary target output: {}", result);
     }
     result as usize
 }

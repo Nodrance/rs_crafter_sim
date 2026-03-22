@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use crate::crafting_domain::{ItemId, ItemSet, Recipe, RecipePriorityKey};
 
 pub fn prioritize_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, HashSet<ItemId>) {
-    // Walks backward from target items to find only reachable recipes/items.
-    // Assigns an effective priority order to each retained recipe based on the best path key.
+    // Traverses backward from target outputs to keep only recipes/items that can influence them.
+    // Assigns each retained recipe an effective priority rank derived from best discovered route keys.
     let mut best_item_priorities: HashMap<ItemId, RecipePriorityKey> = HashMap::new();
     let mut best_recipe_priorities: HashMap<Recipe, RecipePriorityKey> = HashMap::new();
     let mut stack = Vec::new();
@@ -18,7 +18,7 @@ pub fn prioritize_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, tar
         let output_priority = best_item_priorities
             .get(&output_item_id)
             .cloned()
-            .expect("Error during recipe sort/prune: Queued items must already have a priority. This should be unreachable.");
+            .expect("Internal traversal state error: queued item is missing its priority key");
 
         for recipe in recipes.iter() {
             if !recipe.output.items.iter().any(|(&item_id, _)| item_id == output_item_id) {
@@ -74,8 +74,8 @@ pub fn prioritize_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, tar
 }
 
 pub fn collect_non_producible_items(recipes: &[Recipe], relevant_item_ids: &HashSet<ItemId>) -> HashSet<ItemId> {
-    // Returns relevant items that no recipe can output.
-    // These items represent external/base resources that must already exist or be added.
+    // Returns relevant items that are never produced by any retained recipe.
+    // These are treated as externally supplied base resources.
     relevant_item_ids
         .iter()
         .copied()
@@ -84,8 +84,8 @@ pub fn collect_non_producible_items(recipes: &[Recipe], relevant_item_ids: &Hash
 }
 
 pub fn select_top_priority_recipes_per_output_item(recipes: &[Recipe]) -> Vec<Recipe> {
-    // Keeps a minimal set of recipes by selecting only those that introduce at least one unseen output item.
-    // Input order is derived from effective priority so lower-priority options are naturally discarded.
+    // Keeps a compact recipe subset by selecting recipes that add at least one new output item.
+    // Processing order follows effective priority, so lower-priority alternatives are dropped.
     let mut sorted = recipes.to_vec();
     sorted.sort_by_key(|recipe| recipe.effective_priority.unwrap_or(isize::MAX));
 
@@ -116,17 +116,17 @@ pub fn select_top_priority_recipes_per_output_item(recipes: &[Recipe]) -> Vec<Re
 }
 
 pub fn detect_recipe_cycles(recipes: &[Recipe]) -> (HashMap<Recipe, bool>, Vec<Vec<Recipe>>) {
-    // Detects cycles in the recipe dependency graph where one recipe's outputs feed another's inputs.
-    // Returns both per-recipe cycle membership and canonicalized cycle routes.
+    // Finds directed cycles in the recipe dependency graph (outputs feeding downstream inputs).
+    // Returns both per-recipe loop membership and canonicalized cycle paths.
     fn recipe_outputs_feed_recipe_inputs(from: &Recipe, to: &Recipe) -> bool {
-        // Checks whether any output item from `from` is consumed as input by `to`.
-        // This defines a directed graph edge from `from` to `to`.
+        // Returns true when an output from `from` is required as an input by `to`.
+        // This relationship defines a directed dependency edge.
         from.output.items.keys().any(|item_id| to.input[*item_id] > 0)
     }
 
     fn canonicalize_cycle_indices(cycle: &[usize]) -> Vec<usize> {
-        // Rotates a cycle index list so equivalent cycles share one canonical representation.
-        // This prevents duplicate cycles discovered from different DFS start points.
+        // Rotates the cycle index list so equivalent cycles share one canonical ordering.
+        // This deduplicates cycles discovered from different DFS entry nodes.
         if cycle.is_empty() {
             return Vec::new();
         }
@@ -152,8 +152,8 @@ pub fn detect_recipe_cycles(recipes: &[Recipe]) -> (HashMap<Recipe, bool>, Vec<V
         seen_cycles: &mut HashSet<Vec<usize>>,
         cycles: &mut Vec<Vec<usize>>,
     ) {
-        // Explores graph paths from `start` and records simple cycles that return to `start`.
-        // Uses on-path tracking to avoid revisiting nodes already in the active DFS branch.
+        // Depth-first explores reachable paths and records cycles that close back to `start`.
+        // `on_path` prevents revisiting vertices already in the active recursion branch.
         for &next in &adjacency[current] {
             if next == start && path.len() > 1 {
                 let cycle = canonicalize_cycle_indices(path);

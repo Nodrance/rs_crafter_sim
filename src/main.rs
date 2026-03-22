@@ -14,22 +14,22 @@ use crafting_solver::{
 };
 
 fn main() {
-    // Runs the end-to-end crafting workflow: load scenario, solve max output,
-    // attempt executable planning with cycle elimination, and print either the
-    // final plan/inventory or fallback required-base-item guidance.
+    // Executes the full demo workflow: load scenario data, compute max craftable output,
+    // search for an executable cycle-safe solution branch, and print either the
+    // executable plan or fallback base-item deficit guidance.
     let recipes = build_demo_recipes();
     let starting_items = build_demo_starting_items();
     let target = build_demo_target_items();
 
     let max = compute_max_craftable_target_amount(recipes.clone(), starting_items.clone(), target.clone());
-    println!("Maximum number of first target item that can be crafted: {}", max);
+    println!("Maximum additional quantity of the primary target item: {}", max);
     if max == 0 {
-        println!("No solution found, cannot craft any of the target items with the provided recipes and starting items.");
+        println!("No feasible crafting solution found for the current target and starting inventory.");
         let required_items = compute_required_base_items(recipes, starting_items, target);
         if required_items.items.is_empty() {
-            println!("No additional base items identified by relaxed solve.");
+            println!("Relaxed deficit analysis found no additional non-producible items to add.");
         } else {
-            println!("Required items to add to starting inventory:");
+            println!("Add the following base items to the starting inventory:");
             for (item_id, count) in required_items.items {
                 println!("- {}: {}", item_display_name(item_id), count);
             }
@@ -51,16 +51,16 @@ fn main() {
             .cloned()
             .collect::<Vec<_>>();
 
-        println!("No executable plan could be found after eliminating loop usage. Falling back to required-items analysis.");
+        println!("No executable plan was found after cycle-elimination branching; running base-item deficit analysis.");
         println!(
-            "Required-items analysis will use {} recipes after cycle elimination.",
+            "Deficit analysis will use {} recipes retained after branch filtering.",
             fallback_recipes.len()
         );
         let required_items = compute_required_base_items(fallback_recipes, starting_items, target);
         if required_items.items.is_empty() {
-            println!("No additional base items identified by relaxed solve.");
+            println!("Relaxed deficit analysis found no additional non-producible items to add.");
         } else {
-            println!("Required items to add to starting inventory:");
+            println!("Add the following base items to the starting inventory:");
             for (item_id, count) in required_items.items {
                 println!("- {}: {}", item_display_name(item_id), count);
             }
@@ -69,9 +69,9 @@ fn main() {
     }
 
     let (solution, plan) = executable_or_fallback.unwrap();
-    println!("Successfully crafted the target item!");
+    println!("Found an executable crafting solution for the target.");
 
-    println!("\nRecipe usage breakdown:");
+    println!("\nSolved recipe usage totals:");
     for recipe in &recipes {
         let var_value = solution.recipe_usage_count(recipe);
         if var_value == 0.0 {
@@ -80,12 +80,12 @@ fn main() {
         println!("- {}: {}", recipe.describe(), var_value);
     }
 
-    println!("\nExecutable recipe plan:");
+    println!("\nExecutable recipe application plan:");
     for (recipe, count) in plan {
         println!("- Apply '{}' x{}", recipe.describe(), count);
     }
 
-    println!("\nFinal inventory:");
+    println!("\nProjected final inventory:");
     for item in &solution.relevant_item_ids {
         let final_val = solution.final_inventory_count(*item);
         if final_val == 0.0 {

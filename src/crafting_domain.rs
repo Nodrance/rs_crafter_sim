@@ -14,8 +14,8 @@ pub const DIAMOND_ID: ItemId = 4;
 const ITEM_NAMES: [&str; 5] = ["Cobblestone", "Gravel", "Sand", "Glass", "Diamond"];
 
 pub fn item_display_name(item_id: ItemId) -> &'static str {
-    // Returns a stable, human-readable item label for logging and UI output.
-    // Falls back to "Unknown" if an out-of-range item id is passed.
+    // Returns a stable, human-readable item label for logs and console output.
+    // Falls back to "Unknown" when the caller passes an unmapped id.
     ITEM_NAMES.get(item_id).copied().unwrap_or("Unknown")
 }
 
@@ -26,8 +26,8 @@ pub struct ItemSet {
 
 impl ItemSet {
     pub fn from_item_counts(items: Vec<(ItemId, usize)>) -> Self {
-        // Constructs an ItemSet from a list of (item_id, count) pairs.
-        // Duplicate item ids are merged so the internal map always stores total counts per item.
+        // Builds an ItemSet from (item_id, count) tuples.
+        // Duplicate ids are merged so each key stores a single accumulated total.
         let mut item_set = Self { items: HashMap::new() };
         for (item_id, count) in items {
             item_set.add_count(item_id, count);
@@ -36,8 +36,8 @@ impl ItemSet {
     }
 
     pub fn add_count(&mut self, item_id: ItemId, count: usize) {
-        // Increments the quantity tracked for a single item id.
-        // This method is the central mutation path for inventory additions.
+        // Increases the tracked quantity for one item id.
+        // Centralizing this update keeps inventory mutations consistent.
         *self.items.entry(item_id).or_insert(0) += count;
     }
 }
@@ -46,8 +46,8 @@ impl Index<ItemId> for ItemSet {
     type Output = usize;
 
     fn index(&self, item_id: ItemId) -> &Self::Output {
-        // Provides read access with zero-default semantics.
-        // Missing keys behave as count 0 so callers can index directly without pre-checking.
+        // Provides zero-default indexed reads.
+        // Missing keys are treated as 0 so callers can index directly without guard logic.
         self.items.get(&item_id).unwrap_or(&0)
     }
 }
@@ -57,15 +57,15 @@ pub struct RecipePriorityKey(pub Vec<isize>);
 
 impl cmp::PartialOrd for RecipePriorityKey {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        // Delegates to total ordering so this type can be used in sorted structures.
+        // Defers to total ordering so this key can be used in ordered collections.
         Some(self.cmp(other))
     }
 }
 
 impl cmp::Ord for RecipePriorityKey {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        // Compares priority vectors lexicographically to prefer lower (better) route keys.
-        // If common prefixes are equal, shorter vectors are considered smaller.
+        // Lexicographically compares route-priority vectors, preferring lower keys.
+        // When prefixes match, the shorter vector ranks first.
         for (a, b) in self.0.iter().zip(other.0.iter()) {
             match a.cmp(b) {
                 cmp::Ordering::Equal => {}
@@ -78,8 +78,8 @@ impl cmp::Ord for RecipePriorityKey {
 
 impl RecipePriorityKey {
     pub fn append_recipe_priority(&mut self, recipe: &Recipe) {
-        // Extends the route key by appending the next recipe's base priority.
-        // This encodes traversal path quality during recipe relevance expansion.
+        // Extends a route key with the next recipe's base priority value.
+        // Used while propagating priorities during relevance traversal.
         self.0.push(recipe.base_priority);
     }
 }
@@ -95,8 +95,8 @@ pub struct Recipe {
 
 impl PartialEq for Recipe {
     fn eq(&self, other: &Self) -> bool {
-        // Recipes are considered equal when their computed unique ids match.
-        // This keeps comparisons cheap and consistent with Hash implementation.
+        // Recipe equality is based solely on the computed unique id.
+        // This keeps Eq consistent with Hash and avoids deep structural comparison.
         self.unique_id == other.unique_id
     }
 }
@@ -105,15 +105,15 @@ impl Eq for Recipe {}
 
 impl Hash for Recipe {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Hashes only the stable unique id so HashMap/HashSet behavior aligns with Eq.
+        // Hashes only the stable unique id to align hashing with equality semantics.
         self.unique_id.hash(state);
     }
 }
 
 impl Recipe {
     fn compute_unique_id_hash(&self) -> usize {
-        // Builds a deterministic hash from inputs, outputs, and base priority.
-        // The resulting id is used for stable identity across cloning and lookups.
+        // Computes a deterministic identity hash from inputs, outputs, and base priority.
+        // The result provides stable recipe identity across clones and map/set lookups.
         let input_items_vec = self
             .input
             .items
@@ -141,8 +141,8 @@ impl Recipe {
     }
 
     pub fn from_single_transform(input: ItemId, input_count: i32, output: ItemId, output_count: i32, priority: isize) -> Self {
-        // Creates a recipe with one input item type and one output item type.
-        // This is a convenience constructor for common simple transforms.
+        // Constructs a single-input, single-output recipe.
+        // Convenience helper for straightforward one-to-one transforms.
         let mut recipe = Self {
             input: ItemSet::from_item_counts(vec![(input, input_count as usize)]),
             output: ItemSet::from_item_counts(vec![(output, output_count as usize)]),
@@ -155,8 +155,8 @@ impl Recipe {
     }
 
     pub fn from_transform(input: Vec<(ItemId, usize)>, output: Vec<(ItemId, usize)>, priority: isize) -> Self {
-        // Creates a recipe from arbitrary input/output item vectors.
-        // This supports multi-input and multi-output recipes.
+        // Constructs a recipe from arbitrary input and output vectors.
+        // Supports multi-input and multi-output transforms.
         let mut recipe = Self {
             input: ItemSet::from_item_counts(input),
             output: ItemSet::from_item_counts(output),
@@ -169,8 +169,8 @@ impl Recipe {
     }
 
     pub fn describe(&self) -> String {
-        // Returns a human-readable recipe description in "inputs -> outputs" format.
-        // Used in logs and LP variable names so output remains understandable.
+        // Builds a human-readable description in "inputs -> outputs" form.
+        // Used in diagnostics and as LP variable labels.
         let input_str = self
             .input
             .items
@@ -197,14 +197,14 @@ pub struct CraftingSolution {
 
 impl CraftingSolution {
     pub fn recipe_usage_count(&self, recipe: &Recipe) -> f64 {
-        // Reads solved usage count for a recipe, defaulting to 0.0 when absent.
-        // This makes caller code concise when iterating over full recipe lists.
+        // Reads solved usage for a recipe, defaulting to 0.0 when absent.
+        // This keeps reporting logic simple when iterating complete recipe lists.
         self.recipe_values.get(recipe).copied().unwrap_or(0.0)
     }
 
     pub fn final_inventory_count(&self, item_id: ItemId) -> f64 {
-        // Reads solved ending inventory for an item, defaulting to 0.0 when absent.
-        // Missing entries are treated as zero to simplify report generation.
+        // Reads solved ending inventory for an item, defaulting to 0.0 if missing.
+        // Missing entries are intentionally interpreted as zero for reporting.
         self.final_inventory_values.get(&item_id).copied().unwrap_or(0.0)
     }
 }

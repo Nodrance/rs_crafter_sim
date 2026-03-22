@@ -10,11 +10,11 @@ pub fn build_executable_plan_from_recipe_usage(
     recipe_values: &HashMap<Recipe, f64>,
     starting_items: &ItemSet,
 ) -> Result<Vec<(Recipe, usize)>, String> {
-    // Converts aggregate recipe usage counts into a valid executable sequence of batched recipe applications.
-    // Uses recursive backtracking to satisfy per-step input availability while honoring usage totals.
+    // Translates solved recipe usage totals into an execution-safe sequence of recipe batches.
+    // Uses backtracking against live inventory so every step remains craftable when applied in order.
     fn compute_max_affordable_batch(recipe: &Recipe, inventory: &ItemSet) -> usize {
-        // Computes the largest batch of `recipe` that can run with the current inventory.
-        // The limiting reagent among all required inputs determines the max batch.
+        // Returns the largest batch count currently affordable for this recipe.
+        // The smallest input ratio acts as the limiting resource.
         let mut max_batch = usize::MAX;
         for (item_id, input_count) in &recipe.input.items {
             if *input_count == 0 {
@@ -27,8 +27,8 @@ pub fn build_executable_plan_from_recipe_usage(
     }
 
     fn apply_recipe_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
-        // Applies one batched recipe execution by consuming inputs and adding outputs.
-        // Mutates inventory in-place to reflect the new simulated state.
+        // Applies one candidate step by consuming inputs and adding outputs.
+        // This mutates the simulation inventory used by the search.
         for (item_id, input_count) in &recipe.input.items {
             let required = input_count * batch;
             let available_entry = inventory.items.entry(*item_id).or_insert(0);
@@ -41,8 +41,8 @@ pub fn build_executable_plan_from_recipe_usage(
     }
 
     fn rollback_recipe_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
-        // Reverts a previously applied batch during backtracking.
-        // This restores inventory to the exact pre-step state for alternate branch exploration.
+        // Reverts the last applied candidate step during backtracking.
+        // This restores inventory exactly before trying alternate branches.
         for (item_id, output_count) in &recipe.output.items {
             let produced = output_count * batch;
             let available_entry = inventory.items.entry(*item_id).or_insert(0);
@@ -55,27 +55,26 @@ pub fn build_executable_plan_from_recipe_usage(
     }
 
     fn append_or_merge_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
-        // Appends a step to the plan, merging with the previous step when it is the same recipe.
-        // This keeps the resulting plan concise and avoids adjacent duplicates.
-        if let Some((last_recipe, last_batch)) = plan.last_mut() {
-            if last_recipe.unique_id == recipe.unique_id {
-                *last_batch += batch;
-                return;
-            }
+        // Appends a step, or merges it into the previous step when recipe ids match.
+        // This keeps the final execution plan compact without changing semantics.
+        if let Some((last_recipe, last_batch)) = plan.last_mut()
+            && last_recipe.unique_id == recipe.unique_id
+        {
+            *last_batch += batch;
+            return;
         }
         plan.push((recipe.clone(), batch));
     }
 
     fn remove_or_shrink_last_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
-        // Undoes the latest plan append/merge operation.
-        // Used to keep plan state consistent with inventory when backtracking.
-        if let Some((last_recipe, last_batch)) = plan.last_mut() {
-            if last_recipe.unique_id == recipe.unique_id {
-                if *last_batch == batch {
-                    plan.pop();
-                } else {
-                    *last_batch -= batch;
-                }
+        // Reverses the latest step insertion/merge to keep plan state in sync with rollback.
+        if let Some((last_recipe, last_batch)) = plan.last_mut()
+            && last_recipe.unique_id == recipe.unique_id
+        {
+            if *last_batch == batch {
+                plan.pop();
+            } else {
+                *last_batch -= batch;
             }
         }
     }
@@ -88,8 +87,8 @@ pub fn build_executable_plan_from_recipe_usage(
         total_remaining: usize,
         plan: &mut Vec<(Recipe, usize)>,
     ) -> bool {
-        // Tries to complete all remaining recipe usages by DFS/backtracking over feasible batches.
-        // Candidate ordering prioritizes loop-involved and high-impact batches to reduce dead ends.
+        // Recursively satisfies remaining usage counts while preserving craftability at each step.
+        // Candidate ordering favors loop-related and larger moves to reduce search churn.
         if total_remaining == 0 {
             return true;
         }
@@ -173,18 +172,21 @@ pub fn build_executable_plan_from_recipe_usage(
         false
     }
 
-    println!("Converting recipe usage counts into an executable crafting plan...");
+    println!("Building executable crafting sequence from solved recipe usage totals...");
     let mut remaining_counts: HashMap<usize, usize> = HashMap::new();
     for recipe in recipes {
         let raw_value = recipe_values.get(recipe).copied().unwrap_or(0.0);
         if raw_value < 0.0 {
-            return Err(format!("Negative usage count for recipe '{}'", recipe.describe()));
+            return Err(format!(
+                "Solver produced a negative usage count for recipe '{}'",
+                recipe.describe()
+            ));
         }
 
         let rounded = raw_value.round();
         if (raw_value - rounded).abs() > 1e-6 {
             return Err(format!(
-                "Non-integer usage count {} for recipe '{}'",
+                "Solver produced non-integer usage count {} for recipe '{}'",
                 raw_value,
                 recipe.describe()
             ));
@@ -236,7 +238,7 @@ pub fn build_executable_plan_from_recipe_usage(
         .join(", ");
 
     Err(format!(
-        "Could not produce a valid execution order with recursive backsolving. Blocked recipes: {}",
+        "No valid execution order could satisfy all solved usages. Remaining blocked recipes: {}",
         blocked
     ))
 }
