@@ -464,14 +464,23 @@ fn get_required_items(recipes: Vec<Recipe>, starting_items: ItemSet, target: Ite
     required
 }
 
-fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> CraftingSolution {
+fn calculate_solution_with_disabled_recipes(
+    recipes: Vec<Recipe>,
+    starting_items: ItemSet,
+    target: ItemSet,
+    disabled_recipe_ids: &HashSet<usize>,
+) -> Option<CraftingSolution> {
     println!("Pruning irrelevant recipes and items...");
     let (recipes, relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
     println!("Setting up linear program with {} variables and {} constraints...", recipes.len(), relevant_item_ids.len());
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
     for recipe in &recipes {
-        let var = problem_variables.add(variable().integer().min(0).name(recipe.name()));
+        let var = if disabled_recipe_ids.contains(&recipe.unique_id) {
+            problem_variables.add(variable().integer().min(0).max(0).name(recipe.name()))
+        } else {
+            problem_variables.add(variable().integer().min(0).name(recipe.name()))
+        };
         recipe_to_variable.insert(recipe.clone(), var);
     }
 
@@ -496,7 +505,8 @@ fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: Ite
         .using(default_solver)
         .with_all(item_constraints.clone())
         .with_all(recipe_constraints.clone())
-        .solve().expect("It's impossible to craft the target items with the provided recipes and starting items");
+        .solve()
+        .ok()?;
     println!("Initial solution found. Locking in recipe usage one by one based on priority...");
     for recipe in &recipes {
         let var = recipe_to_variable.get(recipe).unwrap();
@@ -504,7 +514,8 @@ fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: Ite
         .minimise(*var).using(default_solver)
         .with_all(item_constraints.clone())
         .with_all(recipe_constraints.clone())
-        .solve().expect("Somehow there's no solution anymore after trying to minimize recipe usage");
+        .solve()
+        .ok()?;
         let var_value = solution.value(*var);
         recipe_constraints.push(constraint!(*var == var_value));
         println!("Locked in {} usages for recipe '{}'", var_value, recipe.name());
@@ -528,11 +539,113 @@ fn calculate_solution(recipes: Vec<Recipe>, starting_items: ItemSet, target: Ite
     let mut relevant_item_ids = relevant_item_ids.into_iter().collect::<Vec<_>>();
     relevant_item_ids.sort_unstable();
 
-    CraftingSolution {
+    Some(CraftingSolution {
         recipe_values,
         final_inventory_values,
         relevant_item_ids,
+    })
+}
+
+fn find_executable_solution_with_cycle_elimination(
+    recipes: Vec<Recipe>,
+    starting_items: ItemSet,
+    target: ItemSet,
+) -> Result<(CraftingSolution, Vec<(Recipe, usize)>), HashSet<usize>> {
+    let mut attempts = vec![HashSet::<usize>::new()];
+    let mut visited: HashSet<Vec<usize>> = HashSet::new();
+    visited.insert(Vec::new());
+    let mut attempt_index: usize = 0;
+    let mut best_fallback_disabled_recipe_ids = HashSet::<usize>::new();
+
+    while let Some(disabled_recipe_ids) = attempts.pop() {
+        attempt_index += 1;
+        let mut disabled_sorted = disabled_recipe_ids.iter().copied().collect::<Vec<_>>();
+        disabled_sorted.sort_unstable();
+        println!(
+            "Cycle-elimination attempt #{} with disabled recipe IDs: {:?}",
+            attempt_index,
+            disabled_sorted
+        );
+
+        let solution = calculate_solution_with_disabled_recipes(
+            recipes.clone(),
+            starting_items.clone(),
+            target.clone(),
+            &disabled_recipe_ids,
+        );
+        if solution.is_none() {
+            println!("- Attempt #{} infeasible after disabled set, trying next branch.", attempt_index);
+            if disabled_recipe_ids.len() > best_fallback_disabled_recipe_ids.len() {
+                best_fallback_disabled_recipe_ids = disabled_recipe_ids.clone();
+            }
+            continue;
+        }
+        let solution = solution.unwrap();
+
+        if let Ok(plan) = recipe_usage_to_application_plan(&recipes, &solution.recipe_values, &starting_items) {
+            println!("- Attempt #{} produced an executable plan.", attempt_index);
+            return Ok((solution, plan));
+        }
+
+        let used_recipes = solution
+            .recipe_values
+            .iter()
+            .filter_map(|(recipe, value)| if *value > 0.5 { Some(recipe.clone()) } else { None })
+            .collect::<Vec<_>>();
+        let (_, loops) = find_recipe_loops(&used_recipes);
+        if loops.is_empty() {
+            println!("- Attempt #{} had no used loops to eliminate; no more progress from this branch.", attempt_index);
+            if disabled_recipe_ids.len() > best_fallback_disabled_recipe_ids.len() {
+                best_fallback_disabled_recipe_ids = disabled_recipe_ids.clone();
+            }
+            continue;
+        }
+
+        println!(
+            "- Attempt #{} not executable; found {} used loop routes to branch on.",
+            attempt_index,
+            loops.len()
+        );
+
+        let mut spawned_branches = 0usize;
+
+        for loop_route in loops {
+            let recipe_to_disable = loop_route
+                .iter()
+                .max_by(|recipe_a, recipe_b| {
+                    let value_a = solution.recipe_value(recipe_a);
+                    let value_b = solution.recipe_value(recipe_b);
+                    value_a
+                        .partial_cmp(&value_b)
+                        .unwrap_or(cmp::Ordering::Equal)
+                })
+                .map(|recipe| recipe.unique_id);
+
+            if let Some(recipe_id) = recipe_to_disable {
+                if disabled_recipe_ids.contains(&recipe_id) {
+                    continue;
+                }
+
+                let mut next_disabled = disabled_recipe_ids.clone();
+                next_disabled.insert(recipe_id);
+                let mut key = next_disabled.iter().copied().collect::<Vec<_>>();
+                key.sort_unstable();
+                if visited.insert(key) {
+                    attempts.push(next_disabled);
+                    spawned_branches += 1;
+                }
+            }
+        }
+
+        println!(
+            "- Attempt #{} spawned {} new cycle-elimination branches.",
+            attempt_index,
+            spawned_branches
+        );
     }
+
+    println!("Cycle-elimination search exhausted all branches with no executable plan.");
+    Err(best_fallback_disabled_recipe_ids)
 }
 
 fn recipe_usage_to_application_plan(
@@ -821,8 +934,38 @@ fn main() {
         }
         return;
     }
-    let solution = calculate_solution(recipes.clone(), starting_items.clone(), target.clone());
-    
+    let executable_or_fallback = find_executable_solution_with_cycle_elimination(
+        recipes.clone(),
+        starting_items.clone(),
+        target.clone(),
+    );
+
+    if executable_or_fallback.is_err() {
+        let disabled_recipe_ids = executable_or_fallback.err().unwrap_or_default();
+        let fallback_recipes = recipes
+            .iter()
+            .filter(|recipe| !disabled_recipe_ids.contains(&recipe.unique_id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        println!("No executable plan could be found after eliminating loop usage. Falling back to required-items analysis.");
+        println!(
+            "Required-items analysis will use {} recipes after cycle elimination.",
+            fallback_recipes.len()
+        );
+        let required_items = get_required_items(fallback_recipes, starting_items, target);
+        if required_items.items.is_empty() {
+            println!("No additional base items identified by relaxed solve.");
+        } else {
+            println!("Required items to add to starting inventory:");
+            for (item_id, count) in required_items.items {
+                println!("- {}: {}", item_name(item_id), count);
+            }
+        }
+        return;
+    }
+
+    let (solution, plan) = executable_or_fallback.unwrap();
     println!("Successfully crafted the target item!");
 
     println!("\nRecipe usage breakdown:");
@@ -832,16 +975,9 @@ fn main() {
         println!("- {}: {}", recipe.name(), var_value);
     }
 
-    match recipe_usage_to_application_plan(&recipes, &solution.recipe_values, &starting_items) {
-        Ok(plan) => {
-            println!("\nExecutable recipe plan:");
-            for (recipe, count) in plan {
-                println!("- Apply '{}' x{}", recipe.name(), count);
-            }
-        }
-        Err(error) => {
-            println!("\nCould not build executable recipe plan: {}", error);
-        }
+    println!("\nExecutable recipe plan:");
+    for (recipe, count) in plan {
+        println!("- Apply '{}' x{}", recipe.name(), count);
     }
 
     println!("\nFinal inventory:");
