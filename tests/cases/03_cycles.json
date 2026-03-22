@@ -1,0 +1,121 @@
+{
+  "cases": [
+    {
+      "name": "single-item self-cycle executes with seed",
+      "description": "Inputs: 1x item0 and recipe item0->2x item0. Output target: 2x item0. Why: one seeded execution is craftable and doubles item0 from 1 to 2, so usage is [1] and the target is met.",
+      "recipes": [
+        {
+          "input": [[0, 1]],
+          "output": [[0, 2]],
+          "priority": 0
+        }
+      ],
+      "starting_items": [[0, 1]],
+      "target": [[0, 2]],
+      "expect": {
+        "status": "ok",
+        "remaining_inventory": [[0, 2]],
+        "recipe_invocation_counts": [1]
+      }
+    },
+    {
+      "name": "single-item self-cycle without seed errors",
+      "description": "Inputs: 0x item0 and recipe item0->2x item0. Output target: 1x item0. Why: the cycle cannot start without an initial seed item, so the solver cannot build a valid executable plan and returns error status.",
+      "recipes": [
+        {
+          "input": [[0, 1]],
+          "output": [[0, 2]],
+          "priority": 0
+        }
+      ],
+      "starting_items": [[0, 0]],
+      "target": [[0, 1]],
+      "expect": {
+        "status": "error"
+      }
+    },
+    {
+      "name": "larger cycle without seed errors",
+      "description": "Inputs: no starting resources and a 4-recipe cycle 0->1->2->3->0 with amplification on return. Output target: 1x item0. Why: despite a positive cycle, no recipe is initially affordable, so execution is impossible and status is error.",
+      "recipes": [
+        {
+          "input": [[0, 1]],
+          "output": [[1, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[1, 1]],
+          "output": [[2, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[2, 1]],
+          "output": [[3, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[3, 1]],
+          "output": [[0, 2]],
+          "priority": 0
+        }
+      ],
+      "starting_items": [[0, 0]],
+      "target": [[0, 1]],
+      "expect": {
+        "status": "error"
+      }
+    },
+    {
+      "name": "overlapping cycles without seed error",
+      "description": "Inputs: no starting resources and overlapping cycles sharing item1: (0<->1) and (1<->2). Output target: 1x item0. Why: every cycle still needs a seed to start, and none exists, so branch elimination cannot produce an executable plan.",
+      "recipes": [
+        {
+          "input": [[0, 1]],
+          "output": [[1, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[1, 1]],
+          "output": [[0, 2]],
+          "priority": 0
+        },
+        {
+          "input": [[1, 1]],
+          "output": [[2, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[2, 1]],
+          "output": [[1, 2]],
+          "priority": 0
+        }
+      ],
+      "starting_items": [[0, 0], [1, 0], [2, 0]],
+      "target": [[0, 1]],
+      "expect": {
+        "status": "error"
+      }
+    },
+    {
+      "name": "cycle that includes target item errors",
+      "description": "Inputs: no starting resources and 0->1->0 cycle where target item0 is itself in the loop. Output target: 1x item0. Why: including the target in a cycle does not avoid the seed requirement, so no executable plan exists and status is error.",
+      "recipes": [
+        {
+          "input": [[0, 1]],
+          "output": [[1, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[1, 1]],
+          "output": [[0, 2]],
+          "priority": 0
+        }
+      ],
+      "starting_items": [[0, 0], [1, 0]],
+      "target": [[0, 1]],
+      "expect": {
+        "status": "error"
+      }
+    }
+  ]
+}

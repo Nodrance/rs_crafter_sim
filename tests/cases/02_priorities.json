@@ -1,0 +1,50 @@
+{
+  "cases": [
+    {
+      "name": "higher-priority-value route is selected",
+      "description": "Inputs: 1x item0 and two alternative item0->item2 recipes with priorities 0 and 10. Output target: 1x item2. Why: priority pruning keeps the stronger-priority route for this output, so usage is [0,1] and inventory ends with item0=0, item2=1.",
+      "recipes": [
+        {
+          "input": [[0, 1]],
+          "output": [[2, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[0, 1]],
+          "output": [[2, 1]],
+          "priority": 10
+        }
+      ],
+      "starting_items": [[0, 1]],
+      "target": [[2, 1]],
+      "expect": {
+        "status": "ok",
+        "remaining_inventory": [[0, 0], [2, 1]],
+        "recipe_invocation_counts": [0, 1]
+      }
+    },
+    {
+      "name": "unrelated recipe is eliminated",
+      "description": "Inputs: item0 and item3, with target only requiring item2 from recipe item0->item2; extra recipe item3->item4 is irrelevant. Output target: 1x item2. Why: relevance pruning drops unrelated branches, so only the target-producing recipe runs and unrelated usage stays zero.",
+      "recipes": [
+        {
+          "input": [[0, 1]],
+          "output": [[2, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[3, 1]],
+          "output": [[4, 1]],
+          "priority": 999
+        }
+      ],
+      "starting_items": [[0, 1], [3, 10]],
+      "target": [[2, 1]],
+      "expect": {
+        "status": "ok",
+        "remaining_inventory": [[0, 0], [2, 1]],
+        "recipe_invocation_counts": [1, 0]
+      }
+    }
+  ]
+}

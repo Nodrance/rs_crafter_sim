@@ -3,6 +3,15 @@
 1. Edit `get_recipes()`, `get_starting_items()`, and `get_target()` in `src/demo_scenario.rs` to define your crafting scenario. (line 315 and below)
 2. Run `cargo run` in your terminal
 
+# Solver test harness
+1. Edit JSON files in `tests/cases/` to define sequential solver test cases.
+2. Run `cargo test --test solver_harness`.
+3. Harness files are loaded in sorted filename order, and cases run sequentially.
+4. Each case should include a `description` explaining the inputs, expected outputs, and reasoning.
+5. Each case must set `expect.status` to either:
+	- `ok`: and provide `remaining_inventory` and `recipe_invocation_counts`
+	- `error`: to assert that the solver returns an error status
+
 # Known bugs/edge cases
 I know about these already:
 1. If a recipe has multiple outputs then one of them will have a borked priority that's too high

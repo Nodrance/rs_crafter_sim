@@ -1,0 +1,43 @@
+{
+  "cases": [
+    {
+      "name": "two-step chain success",
+      "description": "Inputs: 2x item0, with recipes item0->item1 and item1->item2. Output target: 2x item2. Why: each step is one-for-one, so each recipe runs twice and inventory ends at item0=0, item1=0, item2=2.",
+      "recipes": [
+        {
+          "input": [[0, 1]],
+          "output": [[1, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[1, 1]],
+          "output": [[2, 1]],
+          "priority": 0
+        }
+      ],
+      "starting_items": [[0, 2]],
+      "target": [[2, 2]],
+      "expect": {
+        "status": "ok",
+        "remaining_inventory": [[0, 0], [1, 0], [2, 2]],
+        "recipe_invocation_counts": [2, 2]
+      }
+    },
+    {
+      "name": "infeasible target produces error",
+      "description": "Inputs: 1x item0 and only recipe item0->item1. Output target: 1x item2. Why: no recipe path produces item2, so the model is infeasible and must return error status.",
+      "recipes": [
+        {
+          "input": [[0, 1]],
+          "output": [[1, 1]],
+          "priority": 0
+        }
+      ],
+      "starting_items": [[0, 1]],
+      "target": [[2, 1]],
+      "expect": {
+        "status": "error"
+      }
+    }
+  ]
+}

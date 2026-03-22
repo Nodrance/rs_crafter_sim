@@ -1,0 +1,117 @@
+{
+  "cases": [
+    {
+      "name": "20-item exponential chain with terminal cycle recipe",
+      "description": "Inputs: 524288x item0 and chain recipes where each item i+1 requires 2 of item i (for i=0..18), then terminal recipe item19->1048577x item0. Output target: 1048577x item0. Why: exact powers-of-two backsolve gives usages [2^18, 2^17, ..., 1, 1], consuming all seeded item0 through the chain and then producing 2^20+1 item0 in the final step.",
+      "recipes": [
+        {
+          "input": [[0, 2]],
+          "output": [[1, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[1, 2]],
+          "output": [[2, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[2, 2]],
+          "output": [[3, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[3, 2]],
+          "output": [[4, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[4, 2]],
+          "output": [[5, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[5, 2]],
+          "output": [[6, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[6, 2]],
+          "output": [[7, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[7, 2]],
+          "output": [[8, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[8, 2]],
+          "output": [[9, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[9, 2]],
+          "output": [[10, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[10, 2]],
+          "output": [[11, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[11, 2]],
+          "output": [[12, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[12, 2]],
+          "output": [[13, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[13, 2]],
+          "output": [[14, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[14, 2]],
+          "output": [[15, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[15, 2]],
+          "output": [[16, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[16, 2]],
+          "output": [[17, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[17, 2]],
+          "output": [[18, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[18, 2]],
+          "output": [[19, 1]],
+          "priority": 0
+        },
+        {
+          "input": [[19, 1]],
+          "output": [[0, 1048577]],
+          "priority": 0
+        }
+      ],
+      "starting_items": [[0, 524288]],
+      "target": [[0, 1048577]],
+      "expect": {
+        "status": "ok",
+        "remaining_inventory": [[0, 1048577], [19, 0]],
+        "recipe_invocation_counts": [262144, 131072, 65536, 32768, 16384, 8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 1]
+      }
+    }
+  ]
+}
