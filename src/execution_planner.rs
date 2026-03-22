@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    analysis::detect_recipe_cycles,
-    domain::{ItemSet, Recipe},
+    crafting_domain::{ItemSet, Recipe},
+    recipe_analysis::detect_recipe_cycles,
 };
 
 pub fn build_executable_plan_from_recipe_usage(

@@ -8,13 +8,13 @@ use good_lp::{
 };
 
 use crate::{
-    analysis::{
+    crafting_domain::{CraftingSolution, ItemSet, Recipe, MAX_RECIPE_VALUE},
+    execution_planner::build_executable_plan_from_recipe_usage,
+    recipe_analysis::{
         collect_non_producible_items, detect_recipe_cycles,
         prioritize_and_prune_relevant_recipes_and_items,
         select_top_priority_recipes_per_output_item,
     },
-    domain::{CraftingSolution, ItemSet, Recipe, MAX_RECIPE_VALUE},
-    planner::build_executable_plan_from_recipe_usage,
 };
 
 pub fn compute_required_base_items(

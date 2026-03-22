@@ -1,4 +1,4 @@
-use crate::domain::{
+use crate::crafting_domain::{
     COBBLESTONE_ID, DIAMOND_ID, GLASS_ID, GRAVEL_ID, ItemSet, Recipe, SAND_ID,
 };
 

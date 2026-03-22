@@ -1,14 +1,14 @@
-mod analysis;
-mod domain;
-mod planner;
-mod scenario;
-mod solver;
+mod crafting_domain;
+mod crafting_solver;
+mod demo_scenario;
+mod execution_planner;
+mod recipe_analysis;
 
-use domain::item_display_name;
-use scenario::{
+use crafting_domain::item_display_name;
+use demo_scenario::{
     build_demo_recipes, build_demo_starting_items, build_demo_target_items,
 };
-use solver::{
+use crafting_solver::{
     compute_max_craftable_target_amount, compute_required_base_items,
     find_executable_solution_via_cycle_elimination,
 };

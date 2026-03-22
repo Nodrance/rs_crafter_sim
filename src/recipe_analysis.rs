@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::{ItemId, ItemSet, Recipe, RecipePriorityKey};
+use crate::crafting_domain::{ItemId, ItemSet, Recipe, RecipePriorityKey};
 
 pub fn prioritize_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, HashSet<ItemId>) {
     // Walks backward from target items to find only reachable recipes/items.
