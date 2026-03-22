@@ -1,4 +1,4 @@
-const WORKS_AT_1023: i32 = 1023;
+const MAX_RECIPE_VALUE: i32 = i32::MAX - 10000; // A large number to use as the upper bound for recipe usage variables, to prevent overflow in the solver while still allowing for very large usage counts when maximizing
 
 
 use std::{cmp, collections::{HashMap, HashSet}, hash::Hash, ops::Index};
@@ -268,6 +268,113 @@ fn filter_highest_priority_recipes_per_item(recipes: &[Recipe]) -> Vec<Recipe> {
         .collect()
 }
 
+fn find_recipe_loops(recipes: &[Recipe]) -> (HashMap<Recipe, bool>, Vec<Vec<Recipe>>) {
+    fn shares_output_to_input(from: &Recipe, to: &Recipe) -> bool {
+        from.output
+            .items
+            .keys()
+            .any(|item_id| to.input[*item_id] > 0)
+    }
+
+    fn canonical_cycle(cycle: &[usize]) -> Vec<usize> {
+        if cycle.is_empty() {
+            return Vec::new();
+        }
+
+        let mut best = cycle.to_vec();
+        for shift in 1..cycle.len() {
+            let mut rotated = Vec::with_capacity(cycle.len());
+            rotated.extend_from_slice(&cycle[shift..]);
+            rotated.extend_from_slice(&cycle[..shift]);
+            if rotated < best {
+                best = rotated;
+            }
+        }
+        best
+    }
+
+    fn dfs_find_cycles(
+        start: usize,
+        current: usize,
+        adjacency: &[Vec<usize>],
+        on_path: &mut [bool],
+        path: &mut Vec<usize>,
+        seen_cycles: &mut HashSet<Vec<usize>>,
+        cycles: &mut Vec<Vec<usize>>,
+    ) {
+        for &next in &adjacency[current] {
+            if next == start && path.len() > 1 {
+                let cycle = canonical_cycle(path);
+                if seen_cycles.insert(cycle.clone()) {
+                    cycles.push(cycle);
+                }
+                continue;
+            }
+
+            if on_path[next] {
+                continue;
+            }
+
+            if path.len() >= adjacency.len() {
+                continue;
+            }
+
+            on_path[next] = true;
+            path.push(next);
+            dfs_find_cycles(start, next, adjacency, on_path, path, seen_cycles, cycles);
+            path.pop();
+            on_path[next] = false;
+        }
+    }
+
+    let mut adjacency = vec![Vec::new(); recipes.len()];
+    for (from_index, from_recipe) in recipes.iter().enumerate() {
+        for (to_index, to_recipe) in recipes.iter().enumerate() {
+            if shares_output_to_input(from_recipe, to_recipe) {
+                adjacency[from_index].push(to_index);
+            }
+        }
+    }
+
+    let mut seen_cycles: HashSet<Vec<usize>> = HashSet::new();
+    let mut cycle_indices: Vec<Vec<usize>> = Vec::new();
+
+    for start in 0..recipes.len() {
+        let mut on_path = vec![false; recipes.len()];
+        let mut path = vec![start];
+        on_path[start] = true;
+        dfs_find_cycles(
+            start,
+            start,
+            &adjacency,
+            &mut on_path,
+            &mut path,
+            &mut seen_cycles,
+            &mut cycle_indices,
+        );
+    }
+
+    cycle_indices.sort();
+
+    let mut in_loop_by_recipe: HashMap<Recipe, bool> = HashMap::new();
+    for recipe in recipes {
+        in_loop_by_recipe.insert(recipe.clone(), false);
+    }
+
+    let mut loops = Vec::with_capacity(cycle_indices.len());
+    for cycle in cycle_indices {
+        let mut loop_recipes = Vec::with_capacity(cycle.len());
+        for recipe_index in cycle {
+            let recipe = recipes[recipe_index].clone();
+            in_loop_by_recipe.insert(recipe.clone(), true);
+            loop_recipes.push(recipe);
+        }
+        loops.push(loop_recipes);
+    }
+
+    (in_loop_by_recipe, loops)
+}
+
 fn get_required_items(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> ItemSet {
     let (recipes, pruned_relevant_item_ids) = sort_and_prune_relevant_recipes_and_items(recipes, &target);
     let recipes = filter_highest_priority_recipes_per_item(&recipes);
@@ -433,6 +540,150 @@ fn recipe_usage_to_application_plan(
     recipe_values: &HashMap<Recipe, f64>,
     starting_items: &ItemSet,
 ) -> Result<Vec<(Recipe, usize)>, String> {
+    fn max_batch_for_recipe(recipe: &Recipe, inventory: &ItemSet) -> usize {
+        let mut max_batch = usize::MAX;
+        for (item_id, input_count) in &recipe.input.items {
+            if *input_count == 0 {
+                continue;
+            }
+            let available = inventory[*item_id];
+            max_batch = max_batch.min(available / *input_count);
+        }
+        max_batch
+    }
+
+    fn apply_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
+        for (item_id, input_count) in &recipe.input.items {
+            let required = input_count * batch;
+            let available_entry = inventory.items.entry(*item_id).or_insert(0);
+            *available_entry -= required;
+        }
+
+        for (item_id, output_count) in &recipe.output.items {
+            inventory.add(*item_id, output_count * batch);
+        }
+    }
+
+    fn unapply_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
+        for (item_id, output_count) in &recipe.output.items {
+            let produced = output_count * batch;
+            let available_entry = inventory.items.entry(*item_id).or_insert(0);
+            *available_entry -= produced;
+        }
+
+        for (item_id, input_count) in &recipe.input.items {
+            inventory.add(*item_id, input_count * batch);
+        }
+    }
+
+    fn push_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
+        if let Some((last_recipe, last_batch)) = plan.last_mut() {
+            if last_recipe.unique_id == recipe.unique_id {
+                *last_batch += batch;
+                return;
+            }
+        }
+        plan.push((recipe.clone(), batch));
+    }
+
+    fn pop_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
+        if let Some((last_recipe, last_batch)) = plan.last_mut() {
+            if last_recipe.unique_id == recipe.unique_id {
+                if *last_batch == batch {
+                    plan.pop();
+                } else {
+                    *last_batch -= batch;
+                }
+            }
+        }
+    }
+
+    fn backsolve_plan(
+        recipes: &[Recipe],
+        in_loop_by_id: &HashMap<usize, bool>,
+        remaining_counts: &mut HashMap<usize, usize>,
+        inventory: &mut ItemSet,
+        total_remaining: usize,
+        plan: &mut Vec<(Recipe, usize)>,
+    ) -> bool {
+        if total_remaining == 0 {
+            return true;
+        }
+
+        let mut candidates: Vec<(&Recipe, usize, usize)> = recipes
+            .iter()
+            .filter_map(|recipe| {
+                let remaining = remaining_counts.get(&recipe.unique_id).copied().unwrap_or(0);
+                if remaining == 0 {
+                    return None;
+                }
+
+                let max_batch = max_batch_for_recipe(recipe, inventory);
+                if max_batch == 0 {
+                    return None;
+                }
+
+                Some((recipe, remaining, max_batch.min(remaining)))
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return false;
+        }
+
+        candidates.sort_by(|(recipe_a, remaining_a, batch_a), (recipe_b, remaining_b, batch_b)| {
+            let in_loop_a = in_loop_by_id.get(&recipe_a.unique_id).copied().unwrap_or(false);
+            let in_loop_b = in_loop_by_id.get(&recipe_b.unique_id).copied().unwrap_or(false);
+
+            in_loop_b
+                .cmp(&in_loop_a)
+                .then_with(|| batch_b.cmp(batch_a))
+                .then_with(|| remaining_b.cmp(remaining_a))
+                .then_with(|| recipe_a.effective_priority.unwrap_or(isize::MAX).cmp(&recipe_b.effective_priority.unwrap_or(isize::MAX)))
+                .then_with(|| recipe_a.unique_id.cmp(&recipe_b.unique_id))
+        });
+
+        for (recipe, remaining, max_batch) in candidates {
+            let mut try_batches = vec![max_batch];
+            if max_batch > 1 {
+                try_batches.push(1);
+            }
+            if max_batch > 2 {
+                try_batches.push(max_batch / 2);
+            }
+            try_batches.sort_unstable();
+            try_batches.dedup();
+            try_batches.reverse();
+
+            for batch in try_batches {
+                if batch == 0 || batch > remaining {
+                    continue;
+                }
+
+                apply_batch(recipe, batch, inventory);
+                remaining_counts.insert(recipe.unique_id, remaining - batch);
+                push_plan_step(plan, recipe, batch);
+
+                if backsolve_plan(
+                    recipes,
+                    in_loop_by_id,
+                    remaining_counts,
+                    inventory,
+                    total_remaining - batch,
+                    plan,
+                ) {
+                    return true;
+                }
+
+                pop_plan_step(plan, recipe, batch);
+                remaining_counts.insert(recipe.unique_id, remaining);
+                unapply_batch(recipe, batch, inventory);
+            }
+        }
+
+        false
+    }
+
     println!("Converting recipe usage counts into an executable crafting plan...");
     let mut remaining_counts: HashMap<usize, usize> = HashMap::new();
     for recipe in recipes {
@@ -456,94 +707,49 @@ fn recipe_usage_to_application_plan(
         }
     }
 
+    let (in_loop_by_recipe, _) = find_recipe_loops(recipes);
+    let in_loop_by_id = recipes
+        .iter()
+        .map(|recipe| {
+            (
+                recipe.unique_id,
+                in_loop_by_recipe.get(recipe).copied().unwrap_or(false),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
     let mut inventory = starting_items.clone();
-    let mut total_remaining: usize = remaining_counts.values().sum();
+    let total_remaining: usize = remaining_counts.values().sum();
     let mut plan: Vec<(Recipe, usize)> = Vec::new();
 
-    while total_remaining > 0 {
-        let mut made_progress = false;
-
-        for recipe in recipes {
-            let remaining = remaining_counts.get(&recipe.unique_id).copied().unwrap_or(0);
-            if remaining == 0 {
-                continue;
-            }
-
-            let mut max_batch = usize::MAX;
-            for (item_id, input_count) in &recipe.input.items {
-                if *input_count == 0 {
-                    continue;
-                }
-                let available = inventory[*item_id];
-                max_batch = max_batch.min(available / *input_count);
-            }
-
-            if max_batch == 0 {
-                continue;
-            }
-
-            let batch = max_batch.min(remaining);
-            if batch == 0 {
-                continue;
-            }
-
-            for (item_id, input_count) in &recipe.input.items {
-                let required = input_count * batch;
-                let available_entry = inventory.items.entry(*item_id).or_insert(0);
-                if *available_entry < required {
-                    return Err(format!(
-                        "Scheduling bug: recipe '{}' requires {} {} but only {} available",
-                        recipe.name(),
-                        required,
-                        item_name(*item_id),
-                        *available_entry
-                    ));
-                }
-                *available_entry -= required;
-            }
-
-            for (item_id, output_count) in &recipe.output.items {
-                inventory.add(*item_id, output_count * batch);
-            }
-
-            remaining_counts.insert(recipe.unique_id, remaining - batch);
-            total_remaining -= batch;
-
-            if let Some((last_recipe, last_batch)) = plan.last_mut() {
-                if last_recipe.unique_id == recipe.unique_id {
-                    *last_batch += batch;
-                } else {
-                    plan.push((recipe.clone(), batch));
-                }
-            } else {
-                plan.push((recipe.clone(), batch));
-            }
-
-            made_progress = true;
-        }
-
-        if !made_progress {
-            let blocked = recipes
-                .iter()
-                .filter_map(|recipe| {
-                    let remaining = remaining_counts.get(&recipe.unique_id).copied().unwrap_or(0);
-                    if remaining > 0 {
-                        Some(format!("{} (remaining {})", recipe.name(), remaining))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            return Err(format!(
-                "Could not produce a valid execution order with current usage counts. Blocked recipes: {}",
-                blocked
-            ));
-        }
+    if backsolve_plan(
+        recipes,
+        &in_loop_by_id,
+        &mut remaining_counts,
+        &mut inventory,
+        total_remaining,
+        &mut plan,
+    ) {
+        return Ok(plan);
     }
 
-    Ok(plan)
+    let blocked = recipes
+        .iter()
+        .filter_map(|recipe| {
+            let remaining = remaining_counts.get(&recipe.unique_id).copied().unwrap_or(0);
+            if remaining > 0 {
+                Some(format!("{} (remaining {})", recipe.name(), remaining))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(format!(
+        "Could not produce a valid execution order with recursive backsolving. Blocked recipes: {}",
+        blocked
+    ))
 }
 
 fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet) -> usize {
@@ -556,7 +762,7 @@ fn calculate_max(recipes: Vec<Recipe>, starting_items: ItemSet, target: ItemSet)
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
     for recipe in &recipes {
-        let var = problem_variables.add(variable().integer().min(0).max(i32::MAX-WORKS_AT_1023).name(recipe.name()));
+        let var = problem_variables.add(variable().integer().min(0).max(MAX_RECIPE_VALUE).name(recipe.name()));
         recipe_to_variable.insert(recipe.clone(), var);
     }
 
@@ -694,7 +900,7 @@ fn get_recipes() -> Vec<Recipe> {
 
 fn get_starting_items() -> ItemSet {
     ItemSet::new(vec![
-    (COBBLESTONE_ID, 20),
+    (COBBLESTONE_ID, 0),
     ])
 }
 
