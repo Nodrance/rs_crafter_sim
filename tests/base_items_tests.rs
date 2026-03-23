@@ -111,3 +111,18 @@ fn compute_required_base_items_breaks_cycle_branch_when_target_is_in_cycle() {
 
     assert_required_base_items(&required, &[(1, 1)]);
 }
+
+#[test]
+fn compute_required_base_items_reports_loop_entry_and_missing_input_for_unstartable_cycle() {
+    let recipes = vec![
+        Recipe::from_single_transform(0, 1, 1, 1, 0),
+        Recipe::from_single_transform(1, 1, 0, 1, 0),
+        Recipe::from_single_transform(3, 1, 2, 1, 0),
+    ];
+    let starting_items = ItemSet::from_item_counts(vec![]);
+    let target = ItemSet::from_item_counts(vec![(0, 1), (2, 1)]);
+
+    let required = compute_required_base_items(recipes, starting_items, target);
+
+    assert_required_base_items(&required, &[(1, 1), (3, 1)]);
+}

@@ -238,6 +238,73 @@ fn collect_loop_closing_recipe_ids_on_target_branches(
     loop_closing_recipe_ids
 }
 
+fn collect_loop_entry_deficit_items_on_target_branches(
+    recipes: &[Recipe],
+    target: &ItemSet,
+) -> HashSet<ItemId> {
+    // Walks recipe-input branches backward from target items.
+    // When a branch revisits an ancestor item, the current item is treated as a
+    // synthetic deficit item for that branch because the loop has no independent
+    // way to start at that point.
+    fn walk_item_dependencies(
+        item_id: ItemId,
+        output_to_recipes: &HashMap<ItemId, Vec<&Recipe>>,
+        path_items: &mut HashSet<ItemId>,
+        loop_entry_deficit_items: &mut HashSet<ItemId>,
+    ) {
+        let Some(producing_recipes) = output_to_recipes.get(&item_id) else {
+            return;
+        };
+
+        for recipe in producing_recipes {
+            for input_item_id in recipe.input.items.keys() {
+                if path_items.contains(input_item_id) {
+                    loop_entry_deficit_items.insert(item_id);
+                    continue;
+                }
+
+                path_items.insert(*input_item_id);
+                walk_item_dependencies(
+                    *input_item_id,
+                    output_to_recipes,
+                    path_items,
+                    loop_entry_deficit_items,
+                );
+                path_items.remove(input_item_id);
+            }
+        }
+    }
+
+    let mut output_to_recipes: HashMap<ItemId, Vec<&Recipe>> = HashMap::new();
+    for recipe in recipes {
+        for output_item_id in recipe.output.items.keys() {
+            output_to_recipes
+                .entry(*output_item_id)
+                .or_default()
+                .push(recipe);
+        }
+    }
+
+    let mut loop_entry_deficit_items = HashSet::<ItemId>::new();
+    for target_item_id in target.items.keys() {
+        let mut path_items = HashSet::<ItemId>::new();
+        path_items.insert(*target_item_id);
+        walk_item_dependencies(
+            *target_item_id,
+            &output_to_recipes,
+            &mut path_items,
+            &mut loop_entry_deficit_items,
+        );
+    }
+
+    crate::debugln!(
+        "[debug] collect_loop_entry_deficit_items_on_target_branches: found {} synthetic deficit items.",
+        loop_entry_deficit_items.len()
+    );
+
+    loop_entry_deficit_items
+}
+
 pub fn compute_required_base_items(
     recipes: Vec<Recipe>,
     starting_items: ItemSet,
@@ -251,16 +318,20 @@ pub fn compute_required_base_items(
 
     let relevant_item_ids = collect_relevant_item_ids(&recipes, &target, &pruned_relevant_item_ids);
 
-    let items_with_no_recipes = collect_non_producible_items(&recipes, &relevant_item_ids);
+    let mut deficit_item_ids = collect_non_producible_items(&recipes, &relevant_item_ids);
+    deficit_item_ids.extend(collect_loop_entry_deficit_items_on_target_branches(
+        &recipes,
+        &target,
+    ));
 
     crate::debugln!(
-        "[debug] compute_required_base_items: recipes={}, relevant-items={}, non-producible={}",
+        "[debug] compute_required_base_items: recipes={}, relevant-items={}, deficit-items={}",
         recipes.len(),
         relevant_item_ids.len(),
-        items_with_no_recipes.len()
+        deficit_item_ids.len()
     );
 
-    if items_with_no_recipes.is_empty() {
+    if deficit_item_ids.is_empty() {
         let loop_closing_recipe_ids =
             collect_loop_closing_recipe_ids_on_target_branches(&recipes, &target);
         if !loop_closing_recipe_ids.is_empty() {
@@ -275,15 +346,15 @@ pub fn compute_required_base_items(
     }
 
     println!(
-        "Relaxed deficit analysis is using {} recipes and {} relevant items ({} with no recipes).",
+        "Relaxed deficit analysis is using {} recipes and {} relevant items ({} deficit items).",
         recipes.len(),
         relevant_item_ids.len(),
-        items_with_no_recipes.len()
+        deficit_item_ids.len()
     );
 
     if recipes.is_empty() {
         let mut required = ItemSet::from_item_counts(vec![]);
-        for item_id in &items_with_no_recipes {
+        for item_id in &deficit_item_ids {
             let needed = target[*item_id].saturating_sub(starting_items[*item_id]);
             if needed > 0 {
                 required.add_count(*item_id, needed);
@@ -302,7 +373,7 @@ pub fn compute_required_base_items(
         &target,
         &recipe_to_variable,
         "Internal mapping error: recipe variable missing while building base-item constraints",
-        |item_id| !items_with_no_recipes.contains(&item_id),
+        |item_id| !deficit_item_ids.contains(&item_id),
     );
 
     let recipe_constraints = lock_recipe_usages_in_priority_order(
@@ -330,7 +401,7 @@ pub fn compute_required_base_items(
     let solution = solution_result.expect("Relaxed base-item deficit model could not be solved");
 
     let mut required = ItemSet::from_item_counts(vec![]);
-    for item_id in &items_with_no_recipes {
+    for item_id in &deficit_item_ids {
         let final_inventory = item_expressions
             .get(item_id)
             .expect("Internal expression error: missing non-producible item expression")

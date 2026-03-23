@@ -20,14 +20,43 @@ const STRESS_ITEM_NAMES: [&str; STRESS_ITEM_COUNT] = [
     "Phi", "Chi", "Psi", "Omega", "OmegaPrime",
 ];
 
+pub const KLIEN_ITEM_BASE_ID: usize = 200;
+pub const KLIEN_ITEM_COUNT: usize = 21;
+const KLIEN_ITEM_NAMES: [&str; KLIEN_ITEM_COUNT] = [
+    "EMC",
+    "Dirt",
+    "Oak Log",
+    "Charcoal",
+    "Ink Sac",
+    "Glow Ink",
+    "Lapis",
+    "Amethyst",
+    "Diamond",
+    "Emerald",
+    "Klein Star Ein",
+    "Klein Star Zwei",
+    "Klein Star Drei",
+    "Klein Star Vier",
+    "Klein Star Sphere",
+    "Klein Star Omega",
+    "Magnus Star",
+    "Colossal Star",
+    "Gargantuan Star",
+    "Final Star Shard",
+    "Final Star",
+];
+
 pub fn item_display_name(item_id: ItemId) -> &'static str {
     // Returns a stable, human-readable item label for logs and console output.
     // Falls back to "Unknown" when the caller passes an unmapped id.
     if let Some(name) = ITEM_NAMES.get(item_id) {
         name
-    } else if item_id >= STRESS_ITEM_BASE_ID && item_id < STRESS_ITEM_BASE_ID + STRESS_ITEM_COUNT {
+    } else if (STRESS_ITEM_BASE_ID..STRESS_ITEM_BASE_ID + STRESS_ITEM_COUNT).contains(&item_id) {
         let index = item_id - STRESS_ITEM_BASE_ID;
         STRESS_ITEM_NAMES.get(index).copied().unwrap_or("Unknown")
+    } else if (KLIEN_ITEM_BASE_ID..KLIEN_ITEM_BASE_ID + KLIEN_ITEM_COUNT).contains(&item_id) {
+        let index = item_id - KLIEN_ITEM_BASE_ID;
+        KLIEN_ITEM_NAMES.get(index).copied().unwrap_or("Unknown")
     } else {
         "Unknown"
     }

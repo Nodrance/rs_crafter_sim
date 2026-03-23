@@ -1,6 +1,6 @@
 use crate::crafting_domain::{
-    COBBLESTONE_ID, DIAMOND_ID, GLASS_ID, GRAVEL_ID, ItemSet, Recipe, SAND_ID, STRESS_ITEM_BASE_ID,
-    STRESS_ITEM_COUNT,
+    COBBLESTONE_ID, DIAMOND_ID, GLASS_ID, GRAVEL_ID, ItemSet, KLIEN_ITEM_BASE_ID, Recipe, SAND_ID,
+    STRESS_ITEM_BASE_ID, STRESS_ITEM_COUNT,
 };
 
 pub type ScenarioData = (Vec<Recipe>, ItemSet, ItemSet);
@@ -71,68 +71,88 @@ pub fn build_stress_scenario() -> ScenarioData {
 }
 
 pub fn build_loop_stress_scenario() -> ScenarioData {
-    // Defines and returns a large stress cycle scenario with many overlapping loops,
-    // asymmetric conversions, and mixed multi-input/multi-output branches.
+    // Minimal scenario that reproduces the relaxed base-item panic.
+    // - `s(0) <-> s(1)` is a closed conservation loop, so `s(0) >= 1` is impossible from empty start.
+    // - `s(3) -> s(2)` makes target item `s(2)` producible, while introducing one non-producible
+    //   input item `s(3)` so deficit analysis relaxes only that item.
+    // This keeps the panic in `compute_required_base_items(...)` rather than failing earlier.
     let s = stress_item_id;
 
     let recipes = vec![
-        Recipe::from_transform(vec![(s(0), 3), (s(4), 1)], vec![(s(1), 5), (s(7), 1)], 2),
-        Recipe::from_transform(vec![(s(1), 2), (s(8), 1)], vec![(s(2), 3), (s(11), 2)], -1),
-        Recipe::from_transform(vec![(s(2), 5)], vec![(s(3), 2), (s(9), 1)], 4),
-        Recipe::from_transform(vec![(s(3), 3), (s(6), 2)], vec![(s(4), 4), (s(12), 1)], 0),
-        Recipe::from_transform(vec![(s(4), 6)], vec![(s(5), 3), (s(0), 1)], -3),
-        Recipe::from_transform(vec![(s(5), 4), (s(10), 1)], vec![(s(6), 2), (s(13), 2)], 6),
-        Recipe::from_transform(vec![(s(6), 5), (s(2), 1)], vec![(s(7), 4)], -2),
-        Recipe::from_transform(vec![(s(7), 3), (s(14), 1)], vec![(s(8), 6), (s(15), 1)], 3),
-        Recipe::from_transform(vec![(s(8), 4), (s(1), 2)], vec![(s(9), 5), (s(16), 1)], 7),
-        Recipe::from_transform(vec![(s(9), 7)], vec![(s(10), 2), (s(5), 3)], -5),
-        Recipe::from_transform(vec![(s(10), 3), (s(12), 1)], vec![(s(11), 4), (s(17), 2)], 1),
-        Recipe::from_transform(vec![(s(11), 6), (s(3), 1)], vec![(s(12), 5)], 5),
-        Recipe::from_transform(vec![(s(12), 2), (s(18), 2)], vec![(s(13), 7), (s(4), 1)], -4),
-        Recipe::from_transform(vec![(s(13), 8)], vec![(s(14), 3), (s(19), 2)], 8),
-        Recipe::from_transform(vec![(s(14), 2), (s(6), 3)], vec![(s(15), 5), (s(20), 1)], -6),
-        Recipe::from_transform(vec![(s(15), 5), (s(9), 1)], vec![(s(16), 4), (s(2), 2)], 2),
-        Recipe::from_transform(vec![(s(16), 3), (s(21), 1)], vec![(s(17), 6)], 0),
-        Recipe::from_transform(vec![(s(17), 7)], vec![(s(18), 2), (s(10), 3)], 9),
-        Recipe::from_transform(vec![(s(18), 4), (s(5), 2)], vec![(s(19), 5), (s(22), 1)], -7),
-        Recipe::from_transform(vec![(s(19), 6), (s(11), 1)], vec![(s(20), 4), (s(8), 2)], 4),
-        Recipe::from_transform(vec![(s(20), 3), (s(23), 1)], vec![(s(21), 7), (s(12), 1)], -2),
-        Recipe::from_transform(vec![(s(21), 5), (s(0), 2)], vec![(s(22), 6), (s(14), 1)], 6),
-        Recipe::from_transform(vec![(s(22), 4), (s(13), 1)], vec![(s(23), 3), (s(16), 2)], -1),
-        Recipe::from_transform(vec![(s(23), 2), (s(24), 2)], vec![(s(24), 5), (s(1), 1)], 5),
-        Recipe::from_transform(vec![(s(24), 9)], vec![(s(0), 4), (s(18), 3)], -8),
-        Recipe::from_transform(vec![(s(2), 3), (s(15), 2)], vec![(s(6), 6), (s(22), 1)], 3),
-        Recipe::from_transform(vec![(s(7), 1), (s(19), 3)], vec![(s(3), 5), (s(10), 1)], -3),
-        Recipe::from_transform(vec![(s(4), 2), (s(17), 2)], vec![(s(9), 4), (s(24), 1)], 1),
-        Recipe::from_transform(vec![(s(11), 3), (s(20), 2)], vec![(s(5), 6), (s(23), 1)], -4),
-        Recipe::from_transform(vec![(s(16), 2), (s(8), 3)], vec![(s(12), 7), (s(21), 1)], 2),
-        Recipe::from_transform(vec![(s(18), 1), (s(14), 4)], vec![(s(2), 5), (s(7), 2)], -2),
-        Recipe::from_transform(vec![(s(1), 5), (s(22), 1)], vec![(s(13), 4), (s(19), 2)], 4),
-        Recipe::from_transform(vec![(s(6), 2), (s(24), 3)], vec![(s(17), 5), (s(0), 1)], -5),
-        Recipe::from_transform(vec![(s(9), 2), (s(3), 2), (s(21), 1)], vec![(s(15), 6)], 7),
-        Recipe::from_transform(vec![(s(10), 4), (s(12), 2)], vec![(s(18), 5), (s(4), 2)], -6),
-        Recipe::from_transform(vec![(s(23), 3), (s(5), 1)], vec![(s(11), 6), (s(16), 1)], 0),
-        Recipe::from_transform(vec![(s(20), 2), (s(2), 2), (s(7), 1)], vec![(s(24), 4), (s(14), 2)], 5),
-        Recipe::from_transform(vec![(s(13), 4), (s(0), 1)], vec![(s(8), 5), (s(22), 2)], -1),
-        Recipe::from_transform(vec![(s(15), 3), (s(6), 1), (s(19), 1)], vec![(s(1), 7), (s(20), 1)], 3),
-        Recipe::from_transform(vec![(s(17), 2), (s(10), 1), (s(4), 1)], vec![(s(23), 5), (s(9), 1)], -4),
-        Recipe::from_transform(vec![(s(24), 2), (s(14), 1), (s(11), 2)], vec![(s(3), 6), (s(18), 1)], 6),
-        Recipe::from_transform(vec![(s(22), 3), (s(16), 1), (s(5), 2)], vec![(s(12), 8)], -7),
+        Recipe::from_single_transform(s(0), 1, s(1), 1, 0),
+        Recipe::from_single_transform(s(1), 1, s(0), 1, 0),
+        Recipe::from_single_transform(s(3), 1, s(2), 1, 0),
     ];
 
-    let starting_items = ItemSet::from_item_counts(vec![
-        (s(0), 850),
-        (s(3), 420),
-        (s(7), 310),
-        (s(12), 215),
-        (s(19), 160),
-        (s(24), 95),
-    ]);
+    let starting_items = ItemSet::from_item_counts(vec![]);
 
-    let target = ItemSet::from_item_counts(vec![(s(0), 1300), (s(18), 420), (s(23), 260)]);
+    let target = ItemSet::from_item_counts(vec![(s(0), 1), (s(2), 1)]);
 
     crate::debugln!(
         "[debug] build_loop_stress_scenario: recipes={}, starting-items={}, target-items={}",
+        recipes.len(),
+        starting_items.items.len(),
+        target.items.len()
+    );
+
+    (recipes, starting_items, target)
+}
+
+pub fn build_klien_star_scenario() -> ScenarioData {
+    let k = |index: usize| KLIEN_ITEM_BASE_ID + index;
+    let dirt      = k(1);
+    let oak_log   = k(2);
+    let charcoal  = k(3);
+    let ink_sac   = k(4);
+    let glow_ink  = k(5);
+    let lapis     = k(6);
+    let amethyst  = k(7);
+    let diamond   = k(8);
+    let emerald   = k(9);
+    let ein       = k(10);
+    let zwei      = k(11);
+    let drei      = k(12);
+    let vier      = k(13);
+    let sphere    = k(14);
+    let omega     = k(15);
+    let magnus    = k(16);
+    let colossal  = k(17);
+    let gargantuan = k(18);
+    let shard     = k(19);
+    let final_star = k(20);
+
+    let recipes = vec![
+        // --- Direct transformations ---
+        Recipe::from_single_transform(dirt, 1, dirt, 2, 0),
+        Recipe::from_single_transform(oak_log, 1, charcoal, 1, 1),
+        Recipe::from_single_transform(ink_sac, 1, glow_ink, 1, 2),
+        Recipe::from_single_transform(lapis, 1, amethyst, 1, 3),
+        Recipe::from_single_transform(diamond, 1, emerald, 1, 4),
+        // --- Reverse transformations ---
+        Recipe::from_single_transform(charcoal, 1, oak_log, 2, 1),
+        Recipe::from_single_transform(glow_ink, 1, ink_sac, 2, 2),
+        Recipe::from_single_transform(amethyst, 1, lapis, 2, 3),
+        Recipe::from_single_transform(emerald, 1, diamond, 2, 4),
+        // --- Klein Star crafting chain ---
+        Recipe::from_single_transform(emerald,        2, ein,        1, 0),
+        Recipe::from_single_transform(ein,             4, zwei,       1, 0),
+        Recipe::from_single_transform(zwei,            4, drei,       1, 0),
+        Recipe::from_single_transform(drei,            4, vier,       1, 0),
+        Recipe::from_single_transform(vier,            4, sphere,     1, 0),
+        Recipe::from_single_transform(sphere,          4, omega,      1, 0),
+        Recipe::from_single_transform(omega,           4, magnus,     1, 0),
+        Recipe::from_single_transform(magnus,          4, colossal,   1, 0),
+        Recipe::from_single_transform(colossal,        4, gargantuan, 1, 0),
+        Recipe::from_single_transform(gargantuan,      8, shard,      1, 0),
+        Recipe::from_single_transform(shard,       20000, final_star, 1, 0),
+    ];
+
+    let starting_items = ItemSet::from_item_counts(vec![(dirt,1)]);
+
+    let target = ItemSet::from_item_counts(vec![(final_star, 1)]);
+
+    crate::debugln!(
+        "[debug] build_klien_star_scenario: recipes={}, starting-items={}, target-items={}",
         recipes.len(),
         starting_items.items.len(),
         target.items.len()

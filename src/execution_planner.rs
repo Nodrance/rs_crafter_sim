@@ -80,6 +80,11 @@ pub fn build_executable_plan_from_recipe_usage(
         }
     }
 
+    struct BacksolveProgress {
+        logger: PeriodicLogger,
+        explored_states: usize,
+    }
+
     fn recursively_backsolve_plan(
         recipes: &[Recipe],
         in_loop_by_id: &HashMap<usize, bool>,
@@ -87,15 +92,14 @@ pub fn build_executable_plan_from_recipe_usage(
         inventory: &mut ItemSet,
         total_remaining: usize,
         plan: &mut Vec<(Recipe, usize)>,
-        logger: &mut PeriodicLogger,
-        explored_states: &mut usize,
+        progress: &mut BacksolveProgress,
     ) -> bool {
         // Recursively satisfies remaining usage counts while preserving craftability at each step.
         // Candidate ordering favors loop-related and larger moves to reduce search churn.
-        *explored_states += 1;
-        logger.heartbeat(&format!(
+        progress.explored_states += 1;
+        progress.logger.heartbeat(&format!(
             "[debug] backsolve progress: explored-states={}, remaining-applications={}, plan-steps={}",
-            explored_states, total_remaining, plan.len()
+            progress.explored_states, total_remaining, plan.len()
         ));
 
         if total_remaining == 0 {
@@ -168,8 +172,7 @@ pub fn build_executable_plan_from_recipe_usage(
                     inventory,
                     total_remaining - batch,
                     plan,
-                    logger,
-                    explored_states,
+                    progress,
                 ) {
                     return true;
                 }
@@ -232,8 +235,10 @@ pub fn build_executable_plan_from_recipe_usage(
     let mut inventory = starting_items.clone();
     let total_remaining: usize = remaining_counts.values().sum();
     let mut plan: Vec<(Recipe, usize)> = Vec::new();
-    let mut explored_states: usize = 0;
-    let mut logger = PeriodicLogger::new(std::time::Duration::from_millis(750));
+    let mut progress = BacksolveProgress {
+        logger: PeriodicLogger::new(std::time::Duration::from_millis(750)),
+        explored_states: 0,
+    };
     let planning_started_at = std::time::Instant::now();
 
     crate::debugln!(
@@ -252,12 +257,11 @@ pub fn build_executable_plan_from_recipe_usage(
         &mut inventory,
         total_remaining,
         &mut plan,
-        &mut logger,
-        &mut explored_states,
+        &mut progress,
     ) {
         crate::debugln!(
             "[debug] build_executable_plan_from_recipe_usage: backsolve planning finished (found=true, explored-states={}, elapsed={:.3?}).",
-            explored_states,
+            progress.explored_states,
             planning_started_at.elapsed()
         );
         crate::debugln!(
@@ -269,7 +273,7 @@ pub fn build_executable_plan_from_recipe_usage(
 
     crate::debugln!(
         "[debug] build_executable_plan_from_recipe_usage: backsolve planning finished (found=false, explored-states={}, elapsed={:.3?}).",
-        explored_states,
+        progress.explored_states,
         planning_started_at.elapsed()
     );
 

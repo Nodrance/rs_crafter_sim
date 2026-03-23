@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use rs_crafter_sim::crafting_domain::item_display_name;
 use rs_crafter_sim::demo_scenario::{
-    build_demo_scenario, build_loop_stress_scenario, build_stress_scenario,
+    build_demo_scenario, build_klien_star_scenario, build_loop_stress_scenario, build_stress_scenario,
 };
 use rs_crafter_sim::crafting_solver::{
     compute_max_craftable_target_amount, compute_required_base_items,
@@ -14,6 +14,7 @@ enum Scenario {
     Demo,
     Stress,
     LoopStress,
+    KlienStar,
 }
 
 fn print_required_base_items_report(required_items: rs_crafter_sim::crafting_domain::ItemSet) {
@@ -40,6 +41,7 @@ fn run() {
             Scenario::Demo => "Demo",
             Scenario::Stress => "Stress",
             Scenario::LoopStress => "LoopStress",
+            Scenario::KlienStar => "KlienStar",
         },
         ITERATIONS,
         rs_crafter_sim::DEBUG_LOGGING_ENABLED
@@ -49,6 +51,7 @@ fn run() {
         Scenario::Demo => build_demo_scenario(),
         Scenario::Stress => build_stress_scenario(),
         Scenario::LoopStress => build_loop_stress_scenario(),
+        Scenario::KlienStar => build_klien_star_scenario(),
     };
 
     rs_crafter_sim::debugln!(
