@@ -106,7 +106,6 @@ fn lock_recipe_usages_in_priority_order(
     problem_variables: &ProblemVariables,
     recipe_to_variable: &HashMap<usize, Variable>,
     item_constraints: &[Constraint],
-    mut on_lock: impl FnMut(&Recipe, f64),
 ) -> Option<Vec<Constraint>> {
     // Solves lexicographically: minimizes each recipe usage in recipe order while locking prior values.
     // Returns the resulting equality constraints that pin recipe variables to chosen usage values.
@@ -134,10 +133,71 @@ fn lock_recipe_usages_in_priority_order(
 
         let var_value = solution.value(*var);
         recipe_constraints.push(constraint!(*var == var_value));
-        on_lock(recipe, var_value);
     }
 
     Some(recipe_constraints)
+}
+
+fn collect_loop_closing_recipe_ids_on_target_branches(
+    recipes: &[Recipe],
+    target: &ItemSet,
+) -> HashSet<usize> {
+    // Walks recipe-input branches backward from target items.
+    // When a branch revisits an ancestor item, the current recipe is treated as loop-closing.
+    // Returning those recipe ids allows callers to "pretend that recipe doesn't exist" and
+    // reveal synthetic base-item deficits for fully-producible cyclic graphs.
+    fn walk_item_dependencies(
+        item_id: ItemId,
+        output_to_recipes: &HashMap<ItemId, Vec<&Recipe>>,
+        path_items: &mut HashSet<ItemId>,
+        loop_closing_recipe_ids: &mut HashSet<usize>,
+    ) {
+        let Some(producing_recipes) = output_to_recipes.get(&item_id) else {
+            return;
+        };
+
+        for recipe in producing_recipes {
+            for input_item_id in recipe.input.items.keys() {
+                if path_items.contains(input_item_id) {
+                    loop_closing_recipe_ids.insert(recipe.unique_id);
+                    continue;
+                }
+
+                path_items.insert(*input_item_id);
+                walk_item_dependencies(
+                    *input_item_id,
+                    output_to_recipes,
+                    path_items,
+                    loop_closing_recipe_ids,
+                );
+                path_items.remove(input_item_id);
+            }
+        }
+    }
+
+    let mut output_to_recipes: HashMap<ItemId, Vec<&Recipe>> = HashMap::new();
+    for recipe in recipes {
+        for output_item_id in recipe.output.items.keys() {
+            output_to_recipes
+                .entry(*output_item_id)
+                .or_default()
+                .push(recipe);
+        }
+    }
+
+    let mut loop_closing_recipe_ids = HashSet::<usize>::new();
+    for target_item_id in target.items.keys() {
+        let mut path_items = HashSet::<ItemId>::new();
+        path_items.insert(*target_item_id);
+        walk_item_dependencies(
+            *target_item_id,
+            &output_to_recipes,
+            &mut path_items,
+            &mut loop_closing_recipe_ids,
+        );
+    }
+
+    loop_closing_recipe_ids
 }
 
 pub fn compute_required_base_items(
@@ -145,8 +205,8 @@ pub fn compute_required_base_items(
     starting_items: ItemSet,
     target: ItemSet,
 ) -> ItemSet {
-    // Solves a relaxed feasibility model to estimate missing non-producible input items.
-    // The solve then lexicographically minimizes recipe usage before calculating base-item deficits.
+    // Tries to solve the problem except without any limits on non-producible items, meaning they can end up negative
+    // Anything that ends up negative is something you need to add in order to get from starting to target, so we can report that as a base-item deficit.
     let (recipes, pruned_relevant_item_ids) =
         prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
     let recipes = select_top_priority_recipes_per_output_item(&recipes);
@@ -155,12 +215,37 @@ pub fn compute_required_base_items(
 
     let items_with_no_recipes = collect_non_producible_items(&recipes, &relevant_item_ids);
 
+    if items_with_no_recipes.is_empty() {
+        let loop_closing_recipe_ids =
+            collect_loop_closing_recipe_ids_on_target_branches(&recipes, &target);
+        if !loop_closing_recipe_ids.is_empty() {
+            let reduced_recipes = recipes
+                .iter()
+                .filter(|recipe| !loop_closing_recipe_ids.contains(&recipe.unique_id))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            return compute_required_base_items(reduced_recipes, starting_items, target);
+        }
+    }
+
     println!(
         "Relaxed deficit analysis is using {} recipes and {} relevant items ({} with no recipes).",
         recipes.len(),
         relevant_item_ids.len(),
         items_with_no_recipes.len()
     );
+
+    if recipes.is_empty() {
+        let mut required = ItemSet::from_item_counts(vec![]);
+        for item_id in &items_with_no_recipes {
+            let needed = target[*item_id].saturating_sub(starting_items[*item_id]);
+            if needed > 0 {
+                required.add_count(*item_id, needed);
+            }
+        }
+        return required;
+    }
 
     let (problem_variables, recipe_to_variable) =
         build_recipe_variables(&recipes, RecipeVariableMode::Unbounded);
@@ -180,7 +265,6 @@ pub fn compute_required_base_items(
         &problem_variables,
         &recipe_to_variable,
         &item_constraints,
-        |_, _| {},
     )
     .expect("Relaxed base-item model failed while minimizing recipe usage");
 
@@ -216,13 +300,7 @@ fn solve_with_disabled_recipes(
 ) -> Option<CraftingSolution> {
     // Solves the main crafting model while forcing selected recipe ids to zero usage.
     // Returns `None` when constraints are infeasible under the current disabled set.
-    println!("Pruning to target-relevant recipes and items...");
     let (recipes, relevant_item_ids) = prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
-    println!(
-        "Constructing LP with {} recipe variables and {} item constraints...",
-        recipes.len(),
-        relevant_item_ids.len()
-    );
 
     let (problem_variables, recipe_to_variable) =
         build_recipe_variables(&recipes, RecipeVariableMode::DisabledAtZero(disabled_recipe_ids));
@@ -237,16 +315,13 @@ fn solve_with_disabled_recipes(
         |_| true,
     );
 
-    println!("Locking recipe usage one variable at a time...");
     let recipe_constraints = lock_recipe_usages_in_priority_order(
         &recipes,
         &problem_variables,
         &recipe_to_variable,
         &item_constraints,
-        |recipe, var_value| println!("Locked usage {} for recipe '{}'", var_value, recipe.describe()),
     )?;
 
-    println!("Re-solving model with locked usages to capture final inventories...");
     let solution = problem_variables
         .clone()
         .minimise(0)
@@ -255,8 +330,6 @@ fn solve_with_disabled_recipes(
         .with_all(recipe_constraints.clone())
         .solve()
         .ok()?;
-
-    println!("Usage locking complete for this branch.");
 
     let mut recipe_values = HashMap::new();
     for recipe in &recipes {
@@ -297,12 +370,7 @@ pub fn find_executable_solution_via_cycle_elimination(
 
     while let Some(disabled_recipe_ids) = attempts.pop() {
         attempt_index += 1;
-        let mut disabled_sorted = disabled_recipe_ids.iter().copied().collect::<Vec<_>>();
-        disabled_sorted.sort_unstable();
-        println!(
-            "Cycle-elimination branch #{} with disabled recipe IDs: {:?}",
-            attempt_index, disabled_sorted
-        );
+        println!("Iteration #{}", attempt_index);
 
         let solution = solve_with_disabled_recipes(
             recipes.clone(),
@@ -311,10 +379,6 @@ pub fn find_executable_solution_via_cycle_elimination(
             &disabled_recipe_ids,
         );
         if solution.is_none() {
-            println!(
-                "- Branch #{} is infeasible with this disabled set; trying another branch.",
-                attempt_index
-            );
             if disabled_recipe_ids.len() > best_fallback_disabled_recipe_ids.len() {
                 best_fallback_disabled_recipe_ids = disabled_recipe_ids.clone();
             }
@@ -327,7 +391,6 @@ pub fn find_executable_solution_via_cycle_elimination(
             &solution.recipe_values,
             &starting_items,
         ) {
-            println!("- Branch #{} produced an executable crafting plan.", attempt_index);
             return Ok((solution, plan));
         }
 
@@ -339,23 +402,11 @@ pub fn find_executable_solution_via_cycle_elimination(
 
         let (_, loops) = detect_recipe_cycles(&used_recipes);
         if loops.is_empty() {
-            println!(
-                "- Branch #{} has no removable used cycles left; this branch is exhausted.",
-                attempt_index
-            );
             if disabled_recipe_ids.len() > best_fallback_disabled_recipe_ids.len() {
                 best_fallback_disabled_recipe_ids = disabled_recipe_ids.clone();
             }
             continue;
         }
-
-        println!(
-            "- Branch #{} is non-executable; branching on {} detected used cycles.",
-            attempt_index,
-            loops.len()
-        );
-
-        let mut spawned_branches = 0usize;
 
         for loop_route in loops {
             let recipe_to_disable = loop_route
@@ -378,18 +429,11 @@ pub fn find_executable_solution_via_cycle_elimination(
                 key.sort_unstable();
                 if visited.insert(key) {
                     attempts.push(next_disabled);
-                    spawned_branches += 1;
                 }
             }
         }
 
-        println!(
-            "- Branch #{} spawned {} follow-up branch(es).",
-            attempt_index, spawned_branches
-        );
     }
-
-    println!("Cycle-elimination search finished with no executable branch.");
     Err(best_fallback_disabled_recipe_ids)
 }
 

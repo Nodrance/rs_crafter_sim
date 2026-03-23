@@ -116,6 +116,22 @@
       "expect": {
         "status": "error"
       }
+    },
+    {
+        "name": "negative cycle errors",
+        "description": "Inputs: 10x item0 and recipe 2x item0->1x item0. Output target: 1x item0. Why: the cycle consumes more than it produces (net loss of 1 item per execution), so it cannot sustain indefinitely and the solver cannot build a valid plan to reach the target.",
+        "recipes": [
+        {
+            "input": [[0, 2]],
+            "output": [[0, 1]],
+            "priority": 0
+        }
+        ],
+        "starting_items": [[0, 10]],
+        "target": [[0, 11]],
+        "expect": {
+        "status": "error"
+        }
     }
   ]
 }

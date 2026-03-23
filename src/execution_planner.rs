@@ -172,7 +172,6 @@ pub fn build_executable_plan_from_recipe_usage(
         false
     }
 
-    println!("Building executable crafting sequence from solved recipe usage totals...");
     let mut remaining_counts: HashMap<usize, usize> = HashMap::new();
     for recipe in recipes {
         let raw_value = recipe_values.get(recipe).copied().unwrap_or(0.0);
