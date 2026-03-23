@@ -1,4 +1,4 @@
-use std::{cmp, collections::HashMap, hash::Hash, ops::Index};
+use std::{cmp, collections::HashMap, ops::Index};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 
@@ -12,11 +12,25 @@ pub const GLASS_ID: ItemId = 3;
 pub const DIAMOND_ID: ItemId = 4;
 
 const ITEM_NAMES: [&str; 5] = ["Cobblestone", "Gravel", "Sand", "Glass", "Diamond"];
+pub const STRESS_ITEM_BASE_ID: usize = 100;
+pub const STRESS_ITEM_COUNT: usize = 25;
+const STRESS_ITEM_NAMES: [&str; STRESS_ITEM_COUNT] = [
+    "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta", "Iota", "Kappa",
+    "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi", "Rho", "Sigma", "Tau", "Upsilon",
+    "Phi", "Chi", "Psi", "Omega", "OmegaPrime",
+];
 
 pub fn item_display_name(item_id: ItemId) -> &'static str {
     // Returns a stable, human-readable item label for logs and console output.
     // Falls back to "Unknown" when the caller passes an unmapped id.
-    ITEM_NAMES.get(item_id).copied().unwrap_or("Unknown")
+    if let Some(name) = ITEM_NAMES.get(item_id) {
+        name
+    } else if item_id >= STRESS_ITEM_BASE_ID && item_id < STRESS_ITEM_BASE_ID + STRESS_ITEM_COUNT {
+        let index = item_id - STRESS_ITEM_BASE_ID;
+        STRESS_ITEM_NAMES.get(index).copied().unwrap_or("Unknown")
+    } else {
+        "Unknown"
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,13 +117,6 @@ impl PartialEq for Recipe {
 
 impl Eq for Recipe {}
 
-impl Hash for Recipe {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Hashes only the stable unique id to align hashing with equality semantics.
-        self.unique_id.hash(state);
-    }
-}
-
 impl Recipe {
     fn compute_unique_id_hash(&self) -> usize {
         // Computes a deterministic identity hash from inputs, outputs, and base priority.
@@ -190,8 +197,8 @@ impl Recipe {
 }
 
 pub struct CraftingSolution {
-    pub recipe_values: HashMap<Recipe, f64>,
-    pub final_inventory_values: HashMap<ItemId, f64>,
+    pub recipe_values: HashMap<usize, f64>,
+    pub final_inventory_values: ItemSet,
     pub relevant_item_ids: Vec<ItemId>,
 }
 
@@ -199,12 +206,12 @@ impl CraftingSolution {
     pub fn recipe_usage_count(&self, recipe: &Recipe) -> f64 {
         // Reads solved usage for a recipe, defaulting to 0.0 when absent.
         // This keeps reporting logic simple when iterating complete recipe lists.
-        self.recipe_values.get(recipe).copied().unwrap_or(0.0)
+        self.recipe_values.get(&recipe.unique_id).copied().unwrap_or(0.0)
     }
 
     pub fn final_inventory_count(&self, item_id: ItemId) -> f64 {
         // Reads solved ending inventory for an item, defaulting to 0.0 if missing.
         // Missing entries are intentionally interpreted as zero for reporting.
-        self.final_inventory_values.get(&item_id).copied().unwrap_or(0.0)
+        self.final_inventory_values[item_id] as f64
     }
 }

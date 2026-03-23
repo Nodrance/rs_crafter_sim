@@ -2,12 +2,13 @@ use std::collections::HashMap;
 
 use crate::{
     crafting_domain::{ItemSet, Recipe},
+    progress_logger::PeriodicLogger,
     recipe_analysis::detect_recipe_cycles,
 };
 
 pub fn build_executable_plan_from_recipe_usage(
     recipes: &[Recipe],
-    recipe_values: &HashMap<Recipe, f64>,
+    recipe_values: &HashMap<usize, f64>,
     starting_items: &ItemSet,
 ) -> Result<Vec<(Recipe, usize)>, String> {
     // Translates solved recipe usage totals into an execution-safe sequence of recipe batches.
@@ -86,9 +87,17 @@ pub fn build_executable_plan_from_recipe_usage(
         inventory: &mut ItemSet,
         total_remaining: usize,
         plan: &mut Vec<(Recipe, usize)>,
+        logger: &mut PeriodicLogger,
+        explored_states: &mut usize,
     ) -> bool {
         // Recursively satisfies remaining usage counts while preserving craftability at each step.
         // Candidate ordering favors loop-related and larger moves to reduce search churn.
+        *explored_states += 1;
+        logger.heartbeat(&format!(
+            "[debug] backsolve progress: explored-states={}, remaining-applications={}, plan-steps={}",
+            explored_states, total_remaining, plan.len()
+        ));
+
         if total_remaining == 0 {
             return true;
         }
@@ -159,6 +168,8 @@ pub fn build_executable_plan_from_recipe_usage(
                     inventory,
                     total_remaining - batch,
                     plan,
+                    logger,
+                    explored_states,
                 ) {
                     return true;
                 }
@@ -174,7 +185,7 @@ pub fn build_executable_plan_from_recipe_usage(
 
     let mut remaining_counts: HashMap<usize, usize> = HashMap::new();
     for recipe in recipes {
-        let raw_value = recipe_values.get(recipe).copied().unwrap_or(0.0);
+        let raw_value = recipe_values.get(&recipe.unique_id).copied().unwrap_or(0.0);
         if raw_value < 0.0 {
             return Err(format!(
                 "Solver produced a negative usage count for recipe '{}'",
@@ -197,13 +208,23 @@ pub fn build_executable_plan_from_recipe_usage(
         }
     }
 
-    let (in_loop_by_recipe, _) = detect_recipe_cycles(recipes);
+    crate::debugln!(
+        "[debug] build_executable_plan_from_recipe_usage: cycle detection for planning starting (recipes={}).",
+        recipes.len()
+    );
+    let cycle_detection_started_at = std::time::Instant::now();
+    let (in_loop_by_recipe, loops) = detect_recipe_cycles(recipes);
+    crate::debugln!(
+        "[debug] build_executable_plan_from_recipe_usage: cycle detection finished (loops={}, elapsed={:.3?}).",
+        loops.len(),
+        cycle_detection_started_at.elapsed()
+    );
     let in_loop_by_id = recipes
         .iter()
         .map(|recipe| {
             (
                 recipe.unique_id,
-                in_loop_by_recipe.get(recipe).copied().unwrap_or(false),
+                in_loop_by_recipe.get(&recipe.unique_id).copied().unwrap_or(false),
             )
         })
         .collect::<HashMap<_, _>>();
@@ -211,6 +232,18 @@ pub fn build_executable_plan_from_recipe_usage(
     let mut inventory = starting_items.clone();
     let total_remaining: usize = remaining_counts.values().sum();
     let mut plan: Vec<(Recipe, usize)> = Vec::new();
+    let mut explored_states: usize = 0;
+    let mut logger = PeriodicLogger::new(std::time::Duration::from_millis(750));
+    let planning_started_at = std::time::Instant::now();
+
+    crate::debugln!(
+        "[debug] build_executable_plan_from_recipe_usage: recipes={}, required-applications={}",
+        recipes.len(),
+        total_remaining
+    );
+    crate::debugln!(
+        "[debug] build_executable_plan_from_recipe_usage: backsolve planning starting."
+    );
 
     if recursively_backsolve_plan(
         recipes,
@@ -219,9 +252,26 @@ pub fn build_executable_plan_from_recipe_usage(
         &mut inventory,
         total_remaining,
         &mut plan,
+        &mut logger,
+        &mut explored_states,
     ) {
+        crate::debugln!(
+            "[debug] build_executable_plan_from_recipe_usage: backsolve planning finished (found=true, explored-states={}, elapsed={:.3?}).",
+            explored_states,
+            planning_started_at.elapsed()
+        );
+        crate::debugln!(
+            "[debug] build_executable_plan_from_recipe_usage: plan found with {} steps.",
+            plan.len()
+        );
         return Ok(plan);
     }
+
+    crate::debugln!(
+        "[debug] build_executable_plan_from_recipe_usage: backsolve planning finished (found=false, explored-states={}, elapsed={:.3?}).",
+        explored_states,
+        planning_started_at.elapsed()
+    );
 
     let blocked = recipes
         .iter()

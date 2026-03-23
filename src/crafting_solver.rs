@@ -60,6 +60,11 @@ fn build_recipe_variables(
         recipe_to_variable.insert(recipe.unique_id, var);
     }
 
+    crate::debugln!(
+        "[debug] build_recipe_variables: created {} variables.",
+        recipe_to_variable.len()
+    );
+
     (problem_variables, recipe_to_variable)
 }
 
@@ -98,6 +103,12 @@ where
         }
     }
 
+    crate::debugln!(
+        "[debug] build_item_flow_expressions_and_constraints: items={}, constraints={}",
+        item_expressions.len(),
+        item_constraints.len()
+    );
+
     (item_expressions, item_constraints)
 }
 
@@ -111,29 +122,51 @@ fn lock_recipe_usages_in_priority_order(
     // Returns the resulting equality constraints that pin recipe variables to chosen usage values.
     let mut recipe_constraints = Vec::new();
 
-    problem_variables
+    crate::debugln!(
+        "[debug] lock_recipe_usages_in_priority_order: initial feasibility solve starting (constraints={}).",
+        item_constraints.len()
+    );
+    let initial_feasibility = problem_variables
         .clone()
         .minimise(0)
         .using(default_solver)
         .with_all(item_constraints.to_vec())
         .with_all(recipe_constraints.clone())
-        .solve()
-        .ok()?;
+        .solve();
+    crate::debugln!(
+        "[debug] lock_recipe_usages_in_priority_order: initial feasibility solve finished (ok={}).",
+        initial_feasibility.is_ok()
+    );
+    initial_feasibility.ok()?;
 
     for recipe in recipes {
         let var = recipe_to_variable.get(&recipe.unique_id)?;
-        let solution = problem_variables
+        crate::debugln!(
+            "[debug] lock_recipe_usages_in_priority_order: solve starting for recipe '{}'.",
+            recipe.describe()
+        );
+        let solution_result = problem_variables
             .clone()
             .minimise(*var)
             .using(default_solver)
             .with_all(item_constraints.to_vec())
             .with_all(recipe_constraints.clone())
-            .solve()
-            .ok()?;
+            .solve();
+        crate::debugln!(
+            "[debug] lock_recipe_usages_in_priority_order: solve finished for recipe '{}' (ok={}).",
+            recipe.describe(),
+            solution_result.is_ok()
+        );
+        let solution = solution_result.ok()?;
 
         let var_value = solution.value(*var);
         recipe_constraints.push(constraint!(*var == var_value));
     }
+
+    crate::debugln!(
+        "[debug] lock_recipe_usages_in_priority_order: locked {} recipe variables.",
+        recipe_constraints.len()
+    );
 
     Some(recipe_constraints)
 }
@@ -197,6 +230,11 @@ fn collect_loop_closing_recipe_ids_on_target_branches(
         );
     }
 
+    crate::debugln!(
+        "[debug] collect_loop_closing_recipe_ids_on_target_branches: found {} loop-closing recipes.",
+        loop_closing_recipe_ids.len()
+    );
+
     loop_closing_recipe_ids
 }
 
@@ -214,6 +252,13 @@ pub fn compute_required_base_items(
     let relevant_item_ids = collect_relevant_item_ids(&recipes, &target, &pruned_relevant_item_ids);
 
     let items_with_no_recipes = collect_non_producible_items(&recipes, &relevant_item_ids);
+
+    crate::debugln!(
+        "[debug] compute_required_base_items: recipes={}, relevant-items={}, non-producible={}",
+        recipes.len(),
+        relevant_item_ids.len(),
+        items_with_no_recipes.len()
+    );
 
     if items_with_no_recipes.is_empty() {
         let loop_closing_recipe_ids =
@@ -273,9 +318,16 @@ pub fn compute_required_base_items(
         .minimise(0)
         .using(default_solver)
         .with_all(item_constraints.clone())
-        .with_all(recipe_constraints.clone())
-        .solve()
-        .expect("Relaxed base-item deficit model could not be solved");
+        .with_all(recipe_constraints.clone());
+    crate::debugln!(
+        "[debug] compute_required_base_items: final relaxed deficit solve starting."
+    );
+    let solution_result = solution.solve();
+    crate::debugln!(
+        "[debug] compute_required_base_items: final relaxed deficit solve finished (ok={}).",
+        solution_result.is_ok()
+    );
+    let solution = solution_result.expect("Relaxed base-item deficit model could not be solved");
 
     let mut required = ItemSet::from_item_counts(vec![]);
     for item_id in &items_with_no_recipes {
@@ -289,6 +341,11 @@ pub fn compute_required_base_items(
         }
     }
 
+    crate::debugln!(
+        "[debug] compute_required_base_items: required base items count={}",
+        required.items.len()
+    );
+
     required
 }
 
@@ -301,6 +358,12 @@ fn solve_with_disabled_recipes(
     // Solves the main crafting model while forcing selected recipe ids to zero usage.
     // Returns `None` when constraints are infeasible under the current disabled set.
     let (recipes, relevant_item_ids) = prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
+
+    crate::debugln!(
+        "[debug] solve_with_disabled_recipes: disabled={}, recipes-after-prune={}",
+        disabled_recipe_ids.len(),
+        recipes.len()
+    );
 
     let (problem_variables, recipe_to_variable) =
         build_recipe_variables(&recipes, RecipeVariableMode::DisabledAtZero(disabled_recipe_ids));
@@ -322,26 +385,37 @@ fn solve_with_disabled_recipes(
         &item_constraints,
     )?;
 
-    let solution = problem_variables
+    crate::debugln!(
+        "[debug] solve_with_disabled_recipes: final branch solve starting (constraints={}).",
+        item_constraints.len() + recipe_constraints.len()
+    );
+    let solution_result = problem_variables
         .clone()
         .minimise(0)
         .using(default_solver)
         .with_all(item_constraints.clone())
         .with_all(recipe_constraints.clone())
-        .solve()
-        .ok()?;
+        .solve();
+    crate::debugln!(
+        "[debug] solve_with_disabled_recipes: final branch solve finished (ok={}).",
+        solution_result.is_ok()
+    );
+    let solution = solution_result.ok()?;
+
+    crate::debugln!("[debug] solve_with_disabled_recipes: LP solve succeeded.");
 
     let mut recipe_values = HashMap::new();
     for recipe in &recipes {
         if let Some(var) = recipe_to_variable.get(&recipe.unique_id) {
-            recipe_values.insert(recipe.clone(), solution.value(*var));
+            recipe_values.insert(recipe.unique_id, solution.value(*var));
         }
     }
 
-    let mut final_inventory_values = HashMap::new();
+    let mut final_inventory_values = ItemSet::from_item_counts(vec![]);
     for item_id in &relevant_item_ids {
         if let Some(expr) = item_expressions.get(item_id) {
-            final_inventory_values.insert(*item_id, expr.eval_with(&solution));
+            let value = expr.eval_with(&solution).round().max(0.0) as usize;
+            final_inventory_values.add_count(*item_id, value);
         }
     }
 
@@ -368,9 +442,18 @@ pub fn find_executable_solution_via_cycle_elimination(
     let mut attempt_index: usize = 0;
     let mut best_fallback_disabled_recipe_ids = HashSet::<usize>::new();
 
+    crate::debugln!(
+        "[debug] find_executable_solution_via_cycle_elimination: starting with {} recipes.",
+        recipes.len()
+    );
+
     while let Some(disabled_recipe_ids) = attempts.pop() {
         attempt_index += 1;
-        println!("Iteration #{}", attempt_index);
+        crate::debugln!(
+            "[debug] cycle-elimination attempt #{} (disabled={}).",
+            attempt_index,
+            disabled_recipe_ids.len()
+        );
 
         let solution = solve_with_disabled_recipes(
             recipes.clone(),
@@ -379,6 +462,7 @@ pub fn find_executable_solution_via_cycle_elimination(
             &disabled_recipe_ids,
         );
         if solution.is_none() {
+            crate::debugln!("[debug] attempt #{} infeasible.", attempt_index);
             if disabled_recipe_ids.len() > best_fallback_disabled_recipe_ids.len() {
                 best_fallback_disabled_recipe_ids = disabled_recipe_ids.clone();
             }
@@ -386,21 +470,65 @@ pub fn find_executable_solution_via_cycle_elimination(
         }
         let solution = solution.expect("Branch feasibility was checked before unwrapping solution");
 
+        crate::debugln!(
+            "[debug] attempt #{}: execution planning starting.",
+            attempt_index
+        );
+        let planning_started_at = std::time::Instant::now();
         if let Ok(plan) = build_executable_plan_from_recipe_usage(
             &recipes,
             &solution.recipe_values,
             &starting_items,
         ) {
+            crate::debugln!(
+                "[debug] attempt #{}: execution planning finished (ok=true, steps={}, elapsed={:.3?}).",
+                attempt_index,
+                plan.len(),
+                planning_started_at.elapsed()
+            );
             return Ok((solution, plan));
         }
+        crate::debugln!(
+            "[debug] attempt #{}: execution planning finished (ok=false, elapsed={:.3?}).",
+            attempt_index,
+            planning_started_at.elapsed()
+        );
 
-        let used_recipes = solution
-            .recipe_values
+        let used_recipes = recipes
             .iter()
-            .filter_map(|(recipe, value)| if *value > 0.5 { Some(recipe.clone()) } else { None })
+            .filter_map(|recipe| {
+                let value = solution
+                    .recipe_values
+                    .get(&recipe.unique_id)
+                    .copied()
+                    .unwrap_or(0.0);
+                if value > 0.5 {
+                    Some(recipe.clone())
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
 
+        crate::debugln!(
+            "[debug] attempt #{}: cycle detection on used recipes starting (used-recipes={}).",
+            attempt_index,
+            used_recipes.len()
+        );
+        let used_cycle_detection_started_at = std::time::Instant::now();
         let (_, loops) = detect_recipe_cycles(&used_recipes);
+        crate::debugln!(
+            "[debug] attempt #{}: cycle detection on used recipes finished (loops={}, elapsed={:.3?}).",
+            attempt_index,
+            loops.len(),
+            used_cycle_detection_started_at.elapsed()
+        );
+        crate::debugln!(
+            "[debug] attempt #{}: used-recipes={}, detected-used-loops={}",
+            attempt_index,
+            used_recipes.len(),
+            loops.len()
+        );
         if loops.is_empty() {
             if disabled_recipe_ids.len() > best_fallback_disabled_recipe_ids.len() {
                 best_fallback_disabled_recipe_ids = disabled_recipe_ids.clone();
@@ -434,6 +562,10 @@ pub fn find_executable_solution_via_cycle_elimination(
         }
 
     }
+    crate::debugln!(
+        "[debug] cycle-elimination exhausted branches. best-disabled-count={}",
+        best_fallback_disabled_recipe_ids.len()
+    );
     Err(best_fallback_disabled_recipe_ids)
 }
 
@@ -468,16 +600,27 @@ pub fn compute_max_craftable_target_amount(
         .get(&target_item_id)
         .expect("Internal expression error: target item expression missing in max-objective model");
 
-    println!("Solving max-craft objective for primary target item...");
+    crate::debugln!(
+        "[debug] compute_max_craftable_target_amount: solving with recipes={}, relevant-items={}",
+        recipes.len(),
+        relevant_item_ids.len()
+    );
+    crate::debugln!(
+        "[debug] compute_max_craftable_target_amount: max-objective solve starting."
+    );
     let solution = problem_variables
         .clone()
         .maximise(objective.clone())
         .using(default_solver)
         .with_all(item_constraints.clone())
         .solve();
-    println!("Max-craft solve completed.");
+    crate::debugln!(
+        "[debug] compute_max_craftable_target_amount: max-objective solve finished (ok={}).",
+        solution.is_ok()
+    );
 
     let Ok(solution) = solution else {
+        crate::debugln!("[debug] compute_max_craftable_target_amount: solve infeasible.");
         return 0;
     };
 

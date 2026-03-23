@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use rs_crafter_sim::crafting_domain::item_display_name;
 use rs_crafter_sim::demo_scenario::{
-    build_demo_scenario, build_stress_scenario,
+    build_demo_scenario, build_loop_stress_scenario, build_stress_scenario,
 };
 use rs_crafter_sim::crafting_solver::{
     compute_max_craftable_target_amount, compute_required_base_items,
@@ -13,6 +13,7 @@ use rs_crafter_sim::crafting_solver::{
 enum Scenario {
     Demo,
     Stress,
+    LoopStress,
 }
 
 fn print_required_base_items_report(required_items: rs_crafter_sim::crafting_domain::ItemSet) {
@@ -31,16 +32,35 @@ fn run() {
     // Executes the full demo workflow: load scenario data, compute max craftable output,
     // search for an executable cycle-safe solution branch, and print either the
     // executable plan or fallback base-item deficit guidance.
-    const SCENARIO: Scenario = Scenario::Stress;
+    const SCENARIO: Scenario = Scenario::LoopStress;
+    const ITERATIONS: usize = 1;
+    rs_crafter_sim::debugln!(
+        "[debug] Run starting with scenario={:?}, iterations={}, debug={}.",
+        match SCENARIO {
+            Scenario::Demo => "Demo",
+            Scenario::Stress => "Stress",
+            Scenario::LoopStress => "LoopStress",
+        },
+        ITERATIONS,
+        rs_crafter_sim::DEBUG_LOGGING_ENABLED
+    );
 
     let (recipes, starting_items, target) = match SCENARIO {
         Scenario::Demo => build_demo_scenario(),
         Scenario::Stress => build_stress_scenario(),
+        Scenario::LoopStress => build_loop_stress_scenario(),
     };
 
-    const ITERATIONS: usize = 10;
+    rs_crafter_sim::debugln!(
+        "[debug] Scenario loaded: recipes={}, starting-items={}, target-items={}",
+        recipes.len(),
+        starting_items.items.len(),
+        target.items.len()
+    );
+
     for iteration in 0..ITERATIONS {
         let is_last_iteration = iteration + 1 == ITERATIONS;
+        rs_crafter_sim::debugln!("[debug] Solver iteration {} / {}", iteration + 1, ITERATIONS);
 
         let max = compute_max_craftable_target_amount(recipes.clone(), starting_items.clone(), target.clone());
         println!("Maximum additional quantity of the primary target item: {}", max);
