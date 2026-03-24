@@ -2,7 +2,7 @@
 1. Install cargo and rust from https://www.rust-lang.org/tools/install
 2. Install cmake or clang or whatever so that you can build highs (the solver I'm using) from source. Just install whatever it complains about missing when you try to build the project, and then try again until it works. Alternatively change cargo.toml from "highs" to "minilp".
 # How to use
-1. Edit `get_recipes()`, `get_starting_items()`, and `get_target()` in `src/demo_scenario.rs` to define your crafting scenario. (line 315 and below)
+1. Edit `src/demo_scenario.rs` to define your crafting scenario, then `main.rs` to reference it.
 2. Run `cargo run` in your terminal
 
 # Solver test harness
