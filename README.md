@@ -7,9 +7,9 @@
 
 Debugging is enabled/disabled in lib.rs
 
-# Solver test harness
+# Testing
 1. Edit JSON files in `tests/cases/` to add new test cases. See existing files for examples.
-2. Run `cargo test --test solver_harness`.
+2. Run `cargo test`.
 
 # Known bugs/edge cases
 I know about these already:
@@ -18,7 +18,12 @@ I know about these already:
 3. Sometimes the solver will fail for some setups of cycles, mainly when you need to use a cycle several times in order to "unlock" a second cycle, such as a 1 nugget -> 2 nugget cycle and a 1 block -> 2 block cycle. 
 If you find anything else let me know and I'll add it to the list.
 
-# Things I am looking for:
+# Limits
+This solver only works in cases where every item has an ID that identifies it, and all items sharing that ID are the same item for the purposes of all recipes. So for example "ore hammer" recipes do not work because an ore hammer with durability 0 will break after the next craft, meaning it's a different item from an ore hammer with 1 duraility. And one with 1 durability produces one with 0, meaning every durability value is a different item. 
+In cases like planks, you could add a translation step that notices all planks work in all relevant plank recipes and just treats them as the same item, and then a translation layer at the end that turns "all planks" back into "oak planks" or "birch planks" or whatever. But that would be a lot of extra code and I haven't done it yet.
+You could also turn a situation like "birch planks make a birch door, all planks make sticks" into "birch planks make birch doors, birch planks make sticks, nonbirch planks make sticks" essentially grouping together sets of items that work the same and treating each recipe that serves multiple groups (like birch and nonbirch planks into sticks) as multiple recipes. But again that would be a lot of extra code and I haven't done it yet.
+
+# Things I am looking for
 1. Panics, anywhere
 2. Incorrect max craftable output calculations
 3. Incorrect crafting plans
