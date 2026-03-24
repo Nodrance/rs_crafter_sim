@@ -1,3 +1,9 @@
+// This module defines the core data structures for items, recipes, and crafting solutions.
+// The only notable things here are that each item is assumed to have a unique ID
+// This means that this system currently only works when every item has one "canonical" ID, and any item with that ID is the same for crafting purposes.
+// This rules out for example a recipe like "2 of any plank make sticks", unless you do a translation step to assign all planks the same ID before processing,
+// then translate back after a plan is generated
+
 use std::{cmp, collections::HashMap, ops::Index};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -20,6 +26,8 @@ const STRESS_ITEM_NAMES: [&str; STRESS_ITEM_COUNT] = [
     "Phi", "Chi", "Psi", "Omega", "OmegaPrime",
 ];
 
+// for an demo based on making a klien star from EMC loops
+// didn't pan out
 pub const KLIEN_ITEM_BASE_ID: usize = 200;
 pub const KLIEN_ITEM_COUNT: usize = 21;
 const KLIEN_ITEM_NAMES: [&str; KLIEN_ITEM_COUNT] = [

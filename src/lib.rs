@@ -1,6 +1,9 @@
-pub mod crafting_domain;
+// This just exports everything so it can be tested.
+// Also defines whether debug logging is enabled and provides a helper macro for it.
+
+pub mod model;
 pub mod crafting_solver;
-pub mod demo_scenario;
+pub mod demo_scenarios;
 pub mod execution_planner;
 pub mod progress_logger;
 pub mod recipe_analysis;

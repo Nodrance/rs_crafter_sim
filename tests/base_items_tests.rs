@@ -1,5 +1,5 @@
 use rs_crafter_sim::{
-    crafting_domain::{ItemSet, Recipe},
+    model::{ItemSet, Recipe},
     crafting_solver::compute_required_base_items,
 };
 

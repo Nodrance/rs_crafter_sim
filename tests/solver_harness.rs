@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use rs_crafter_sim::{
-    crafting_domain::{ItemSet, Recipe},
+    model::{ItemSet, Recipe},
     crafting_solver::find_executable_solution_via_cycle_elimination,
 };
 use serde::Deserialize;

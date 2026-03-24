@@ -9,7 +9,7 @@ use good_lp::{
 };
 
 use crate::{
-    crafting_domain::{CraftingSolution, ItemId, ItemSet, Recipe, MAX_RECIPE_VALUE},
+    model::{CraftingSolution, ItemId, ItemSet, Recipe, MAX_RECIPE_VALUE},
     execution_planner::build_executable_plan_from_recipe_usage,
     recipe_analysis::{
         collect_non_producible_items, collect_relevant_item_ids, detect_recipe_cycles,
@@ -31,7 +31,7 @@ fn build_recipe_variables(
     recipes: &[Recipe],
     mode: RecipeVariableMode,
 ) -> (ProblemVariables, HashMap<usize, Variable>) {
-    // Creates one LP integer variable per recipe with mode-specific bounds.
+    // Adds variables for each recipe
     // Returns both the variable registry and a recipe-id to variable lookup map.
     let mut recipe_to_variable = HashMap::new();
     let mut problem_variables = ProblemVariables::new();
@@ -80,8 +80,13 @@ fn build_item_flow_expressions_and_constraints<F>(
 where
     F: Fn(ItemId) -> bool,
 {
-    // Builds per-item inventory flow expressions and target constraints.
-    // Item constraints are emitted only for item ids accepted by `should_constrain_item`.
+    // Constrains items so that the total number of times they're produced across all recipes
+    // minus the total number of times they're consumed across all recipes, 
+    // plus the starting items, is at least the target. 
+    // For the item we're crafting that target is (start + request)
+    // For every other item it's at least 0, meaning we can't consume items we don't have.
+    // should_constrain_item is a filter that means you can allow some items to end up negative.
+    // This is used for when we know an item is uncraftable with what's in storage and need to figure out how uncraftable it is
     let mut item_expressions = HashMap::with_capacity(relevant_item_ids.len());
     let mut item_constraints = Vec::new();
 
@@ -118,8 +123,10 @@ fn lock_recipe_usages_in_priority_order(
     recipe_to_variable: &HashMap<usize, Variable>,
     item_constraints: &[Constraint],
 ) -> Option<Vec<Constraint>> {
-    // Solves lexicographically: minimizes each recipe usage in recipe order while locking prior values.
-    // Returns the resulting equality constraints that pin recipe variables to chosen usage values.
+    // Iterates over every recipe from lowest to highest priority, minimizing them one by one
+    // It does this by calculating how few times we can use recipe n in step n, then in step n+1 we add a constraint that recipe n must be used exactly that many times, and minimize recipe n+1, and so on.
+    // This simultaneously makes sure that higher priority recipes are used more (because if they weren't, you'd have to be using a lower priority recipe)
+    // It also makes sure that we don't overcraft, because even the highest priority recipe still ends up constrained
     let mut recipe_constraints = Vec::new();
 
     crate::debugln!(
@@ -175,10 +182,10 @@ fn collect_loop_closing_recipe_ids_on_target_branches(
     recipes: &[Recipe],
     target: &ItemSet,
 ) -> HashSet<usize> {
-    // Walks recipe-input branches backward from target items.
-    // When a branch revisits an ancestor item, the current recipe is treated as loop-closing.
-    // Returning those recipe ids allows callers to "pretend that recipe doesn't exist" and
-    // reveal synthetic base-item deficits for fully-producible cyclic graphs.
+    // Looks at all the loops in the recipe graph and finds the recipes that "close the loops"
+    // This is so that when we're trying to see what you need to add to craft the item
+    // We don't get stuck saying "to make wheat you need to add seeds, to make seeds you need to add wheat"
+    // In a case like that we just ignore the seeds from wheat recipe and say you need to add seeds
     fn walk_item_dependencies(
         item_id: ItemId,
         output_to_recipes: &HashMap<ItemId, Vec<&Recipe>>,
@@ -242,10 +249,7 @@ fn collect_loop_entry_deficit_items_on_target_branches(
     recipes: &[Recipe],
     target: &ItemSet,
 ) -> HashSet<ItemId> {
-    // Walks recipe-input branches backward from target items.
-    // When a branch revisits an ancestor item, the current item is treated as a
-    // synthetic deficit item for that branch because the loop has no independent
-    // way to start at that point.
+    // Same thing except it finds the items instead of recipes
     fn walk_item_dependencies(
         item_id: ItemId,
         output_to_recipes: &HashMap<ItemId, Vec<&Recipe>>,
@@ -310,8 +314,8 @@ pub fn compute_required_base_items(
     starting_items: ItemSet,
     target: ItemSet,
 ) -> ItemSet {
-    // Tries to solve the problem except without any limits on non-producible items, meaning they can end up negative
-    // Anything that ends up negative is something you need to add in order to get from starting to target, so we can report that as a base-item deficit.
+    // Tries to solve the problem except without any limits on non-producible items (or some loop items), meaning they can end up negative
+    // Anything that ends up negative is something you need to add in order to get from starting to target
     let (recipes, pruned_relevant_item_ids) =
         prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
     let recipes = select_top_priority_recipes_per_output_item(&recipes);
@@ -426,8 +430,8 @@ fn solve_with_disabled_recipes(
     target: ItemSet,
     disabled_recipe_ids: &HashSet<usize>,
 ) -> Option<CraftingSolution> {
-    // Solves the main crafting model while forcing selected recipe ids to zero usage.
-    // Returns `None` when constraints are infeasible under the current disabled set.
+    // Solves the main crafting model except with some recipes disabled
+    // Returns `None` when there's no solution with those recipes disabled
     let (recipes, relevant_item_ids) = prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
 
     crate::debugln!(
@@ -505,8 +509,9 @@ pub fn find_executable_solution_via_cycle_elimination(
     starting_items: ItemSet,
     target: ItemSet,
 ) -> Result<(CraftingSolution, ExecutablePlan), DisabledRecipeIdSet> {
-    // Explores disabled-recipe branches until it finds a solve whose usages are executable in order.
-    // When a branch is non-executable, it disables one high-usage recipe per detected used cycle.
+    // Recursively looks at combinations of cycles we can ignore in order to try to find a combo we can make a plan for
+    // If it finds a combination of cycles that works, it returns the solution and plan for that combo. 
+    // If it exhausts all combos, it returns the set of disabled recipes from the best combo it found, which can be used for fallback deficit analysis.
     let mut attempts = vec![HashSet::<usize>::new()];
     let mut visited: HashSet<Vec<usize>> = HashSet::new();
     visited.insert(Vec::new());
@@ -645,8 +650,8 @@ pub fn compute_max_craftable_target_amount(
     starting_items: ItemSet,
     target: ItemSet,
 ) -> usize {
-    // Maximizes additional quantity of the first target item under inventory-flow constraints.
-    // Returns the craftable amount above what already exists in starting inventory.
+    // Tries to make as much of an item as possible, given starting items and recipes
+    // Does not account for actual recipe order, meaning it might say you can make bread by borrowing a seed from the future, farming a bunch, then sending that seed back in time.
     let (recipes, relevant_item_ids) = prioritize_and_prune_relevant_recipes_and_items(recipes, &target);
     let target_item_id = *target
         .items

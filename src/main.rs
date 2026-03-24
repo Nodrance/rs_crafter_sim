@@ -1,8 +1,8 @@
 use std::time::Instant;
 
-use rs_crafter_sim::crafting_domain::item_display_name;
-use rs_crafter_sim::demo_scenario::{
-    build_demo_scenario, build_klien_star_scenario, build_loop_stress_scenario, build_stress_scenario,
+use rs_crafter_sim::model::item_display_name;
+use rs_crafter_sim::demo_scenarios::{
+    build_demo_scenario, build_stress_scenario,
 };
 use rs_crafter_sim::crafting_solver::{
     compute_max_craftable_target_amount, compute_required_base_items,
@@ -13,12 +13,10 @@ use rs_crafter_sim::crafting_solver::{
 enum Scenario {
     Demo,
     Stress,
-    LoopStress,
-    KlienStar,
 }
 
-fn print_required_base_items_report(required_items: rs_crafter_sim::crafting_domain::ItemSet) {
-    // Prints a consistent required-base-items report for fallback/zero-max branches.
+fn print_required_base_items_report(required_items: rs_crafter_sim::model::ItemSet) {
+    // Prints out what items you need to add to the starting inventory to make the target craftable, based on the output of compute_required_base_items.
     if required_items.items.is_empty() {
         println!("Relaxed deficit analysis found no additional non-producible items to add.");
     } else {
@@ -30,18 +28,18 @@ fn print_required_base_items_report(required_items: rs_crafter_sim::crafting_dom
 }
 
 fn run() {
-    // Executes the full demo workflow: load scenario data, compute max craftable output,
-    // search for an executable cycle-safe solution branch, and print either the
-    // executable plan or fallback base-item deficit guidance.
-    const SCENARIO: Scenario = Scenario::LoopStress;
+    // Loads a demo based on the SCENARIO variable. Some of them work and some overwhelm the program
+    // Runs it ITERATIONS times for timing measurement
+    // Starts by checking how many of the item can be crafted
+    // Then tries to make a plan for crafting it (in the form of "use this recipe this many times")
+    // If it can't be crafted, it'll try to figure out what items you need to add to the starting inventory to make it craftable, and print that out instead.
+    const SCENARIO: Scenario = Scenario::Demo;
     const ITERATIONS: usize = 1;
     rs_crafter_sim::debugln!(
         "[debug] Run starting with scenario={:?}, iterations={}, debug={}.",
         match SCENARIO {
             Scenario::Demo => "Demo",
             Scenario::Stress => "Stress",
-            Scenario::LoopStress => "LoopStress",
-            Scenario::KlienStar => "KlienStar",
         },
         ITERATIONS,
         rs_crafter_sim::DEBUG_LOGGING_ENABLED
@@ -50,8 +48,6 @@ fn run() {
     let (recipes, starting_items, target) = match SCENARIO {
         Scenario::Demo => build_demo_scenario(),
         Scenario::Stress => build_stress_scenario(),
-        Scenario::LoopStress => build_loop_stress_scenario(),
-        Scenario::KlienStar => build_klien_star_scenario(),
     };
 
     rs_crafter_sim::debugln!(

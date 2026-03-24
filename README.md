@@ -4,6 +4,7 @@
 # How to use
 1. Edit `src/demo_scenario.rs` to define your crafting scenario, then `main.rs` to reference it.
 2. Run `cargo run` in your terminal
+Debugging is enabled/disabled in lib.rs
 
 # Solver test harness
 1. Edit JSON files in `tests/cases/` to add new test cases. See existing files for examples.

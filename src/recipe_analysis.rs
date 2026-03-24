@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    crafting_domain::{ItemId, ItemSet, Recipe, RecipePriorityKey},
+    model::{ItemId, ItemSet, Recipe, RecipePriorityKey},
     progress_logger::PeriodicLogger,
 };
 
@@ -10,8 +10,7 @@ pub fn collect_relevant_item_ids(
     target: &ItemSet,
     extra_item_ids: &HashSet<ItemId>,
 ) -> HashSet<ItemId> {
-    // Collects all item ids relevant to solving: target items, recipe inputs/outputs, and caller-provided extras.
-    // Returns a deduplicated set used for expression and constraint construction.
+    // Figures out what item IDs are "relevant" to a problem, meaning they appear in the target or any recipe input/output.
     let mut relevant_item_ids = HashSet::new();
 
     for item_id in target.items.keys() {
@@ -43,8 +42,10 @@ pub fn collect_relevant_item_ids(
 }
 
 pub fn prioritize_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, target: &ItemSet) -> (Vec<Recipe>, HashSet<ItemId>) {
-    // Traverses backward from target outputs to keep only recipes/items that can influence them.
-    // Assigns each retained recipe an effective priority rank derived from best discovered route keys.
+    // Kind of a double-duty function
+    // It takes the target items, and prunes any recipes or items that aren't relevant to making those target items (not in the same crafting tree)
+    // It also simulates the priorities you'd get from a traditional exponential crafting check
+    // Meaning that if you have a higher priority recipe, its children are also considered higher priority, since under an exponential check you'd get to it first and it would check its children sooner.
     let mut best_item_priorities: HashMap<ItemId, RecipePriorityKey> = HashMap::new();
     let mut best_recipe_priorities: HashMap<usize, RecipePriorityKey> = HashMap::new();
     let mut stack = Vec::new();
@@ -155,8 +156,9 @@ pub fn prioritize_and_prune_relevant_recipes_and_items(recipes: Vec<Recipe>, tar
 }
 
 pub fn collect_non_producible_items(recipes: &[Recipe], relevant_item_ids: &HashSet<ItemId>) -> HashSet<ItemId> {
-    // Returns relevant items that are never produced by any retained recipe.
-    // These are treated as externally supplied base resources.
+    // Returns items that aren't produced by any recipe, the final leaves of a recipe tree
+    // This is used for when we can't craft an item and need to figure out what to add to make it craftable
+    // These are the items eligible to be added
     let non_producible = relevant_item_ids
         .iter()
         .copied()
@@ -174,8 +176,10 @@ pub fn collect_non_producible_items(recipes: &[Recipe], relevant_item_ids: &Hash
 }
 
 pub fn select_top_priority_recipes_per_output_item(recipes: &[Recipe]) -> Vec<Recipe> {
-    // Keeps a compact recipe subset by selecting recipes that add at least one new output item.
-    // Processing order follows effective priority, so lower-priority alternatives are dropped.
+    // When we're checking what we need to add, we only want to consider the highest priority recipes
+    // This is to simulate how an exponential search would work, 
+    // it wouldn't check the second priority recipe until the first one reached a limit
+    // but since we're letting it go negative there will never be a limit
     let mut sorted = recipes.to_vec();
     sorted.sort_by_key(|recipe| recipe.effective_priority.unwrap_or(isize::MAX));
 
@@ -214,8 +218,7 @@ pub fn select_top_priority_recipes_per_output_item(recipes: &[Recipe]) -> Vec<Re
 }
 
 pub fn detect_recipe_cycles(recipes: &[Recipe]) -> (HashMap<usize, bool>, Vec<Vec<Recipe>>) {
-    // Finds directed cycles in the recipe dependency graph (outputs feeding downstream inputs).
-    // Returns both per-recipe loop membership and canonicalized cycle paths.
+    // Finds recipe loops and gives you a list of what recipes are in any loop as well as a list of loops
     let mut _logger = PeriodicLogger::new(std::time::Duration::from_millis(750));
     let _cycle_detection_started_at = std::time::Instant::now();
 
@@ -225,14 +228,12 @@ pub fn detect_recipe_cycles(recipes: &[Recipe]) -> (HashMap<usize, bool>, Vec<Ve
     );
 
     fn recipe_outputs_feed_recipe_inputs(from: &Recipe, to: &Recipe) -> bool {
-        // Returns true when an output from `from` is required as an input by `to`.
-        // This relationship defines a directed dependency edge.
+        // Returns true when one recipe makes the outputs for another
         from.output.items.keys().any(|item_id| to.input[*item_id] > 0)
     }
 
     fn canonicalize_cycle_indices(cycle: &[usize]) -> Vec<usize> {
-        // Rotates the cycle index list so equivalent cycles share one canonical ordering.
-        // This deduplicates cycles discovered from different DFS entry nodes.
+        // Rotates cycles so we don't have ABC and CAB and BCA as different cycles, since they're really the same cycle just starting at a different point
         if cycle.is_empty() {
             return Vec::new();
         }

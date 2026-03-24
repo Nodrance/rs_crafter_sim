@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    crafting_domain::{ItemSet, Recipe},
+    model::{ItemSet, Recipe},
     progress_logger::PeriodicLogger,
     recipe_analysis::detect_recipe_cycles,
 };
@@ -11,11 +11,11 @@ pub fn build_executable_plan_from_recipe_usage(
     recipe_values: &HashMap<usize, f64>,
     starting_items: &ItemSet,
 ) -> Result<Vec<(Recipe, usize)>, String> {
-    // Translates solved recipe usage totals into an execution-safe sequence of recipe batches.
-    // Uses backtracking against live inventory so every step remains craftable when applied in order.
+    // Translates "use this recipe this many times in total" into "apply these recipes in this order"
+    // Keeps track of inventory so each application is actually possible
+    // Uses backtracking, meaning this part can be exponential with lots of loops
     fn compute_max_affordable_batch(recipe: &Recipe, inventory: &ItemSet) -> usize {
         // Returns the largest batch count currently affordable for this recipe.
-        // The smallest input ratio acts as the limiting resource.
         let mut max_batch = usize::MAX;
         for (item_id, input_count) in &recipe.input.items {
             if *input_count == 0 {
@@ -28,8 +28,8 @@ pub fn build_executable_plan_from_recipe_usage(
     }
 
     fn apply_recipe_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
-        // Applies one candidate step by consuming inputs and adding outputs.
-        // This mutates the simulation inventory used by the search.
+        // Applies a step by consuming inputs and adding outputs.
+        // This mutates the inventory used by the search.
         for (item_id, input_count) in &recipe.input.items {
             let required = input_count * batch;
             let available_entry = inventory.items.entry(*item_id).or_insert(0);
@@ -42,8 +42,7 @@ pub fn build_executable_plan_from_recipe_usage(
     }
 
     fn rollback_recipe_batch(recipe: &Recipe, batch: usize, inventory: &mut ItemSet) {
-        // Reverts the last applied candidate step during backtracking.
-        // This restores inventory exactly before trying alternate branches.
+        // Reverts the last applied step to backtrack and try something else.
         for (item_id, output_count) in &recipe.output.items {
             let produced = output_count * batch;
             let available_entry = inventory.items.entry(*item_id).or_insert(0);
@@ -57,7 +56,7 @@ pub fn build_executable_plan_from_recipe_usage(
 
     fn append_or_merge_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
         // Appends a step, or merges it into the previous step when recipe ids match.
-        // This keeps the final execution plan compact without changing semantics.
+        // This lets the plan stay compact
         if let Some((last_recipe, last_batch)) = plan.last_mut()
             && last_recipe.unique_id == recipe.unique_id
         {
@@ -68,7 +67,7 @@ pub fn build_executable_plan_from_recipe_usage(
     }
 
     fn remove_or_shrink_last_plan_step(plan: &mut Vec<(Recipe, usize)>, recipe: &Recipe, batch: usize) {
-        // Reverses the latest step insertion/merge to keep plan state in sync with rollback.
+        // The opposite of append_or_merge_plan_step: removes or shrinks the last step when backtracking.
         if let Some((last_recipe, last_batch)) = plan.last_mut()
             && last_recipe.unique_id == recipe.unique_id
         {
@@ -94,8 +93,9 @@ pub fn build_executable_plan_from_recipe_usage(
         plan: &mut Vec<(Recipe, usize)>,
         progress: &mut BacksolveProgress,
     ) -> bool {
-        // Recursively satisfies remaining usage counts while preserving craftability at each step.
-        // Candidate ordering favors loop-related and larger moves to reduce search churn.
+        // Recursively tries to satisfy each recipe
+        // Prefers recipes in loops, to avoid cases where you use up loop fuel on unrelated things
+        // Also prefers larger moves
         progress.explored_states += 1;
         progress.logger.heartbeat(&format!(
             "[debug] backsolve progress: explored-states={}, remaining-applications={}, plan-steps={}",
