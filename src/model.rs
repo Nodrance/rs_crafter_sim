@@ -19,11 +19,11 @@ pub const DIAMOND_ID: ItemId = 4;
 
 const ITEM_NAMES: [&str; 5] = ["Cobblestone", "Gravel", "Sand", "Glass", "Diamond"];
 pub const STRESS_ITEM_BASE_ID: usize = 100;
-pub const STRESS_ITEM_COUNT: usize = 25;
+pub const STRESS_ITEM_COUNT: usize = 24;
 const STRESS_ITEM_NAMES: [&str; STRESS_ITEM_COUNT] = [
     "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta", "Iota", "Kappa",
     "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi", "Rho", "Sigma", "Tau", "Upsilon",
-    "Phi", "Chi", "Psi", "Omega", "OmegaPrime",
+    "Phi", "Chi", "Psi", "Omega"
 ];
 
 // for an demo based on making a klien star from EMC loops
@@ -62,6 +62,13 @@ pub fn item_display_name(item_id: ItemId) -> &'static str {
     } else if (STRESS_ITEM_BASE_ID..STRESS_ITEM_BASE_ID + STRESS_ITEM_COUNT).contains(&item_id) {
         let index = item_id - STRESS_ITEM_BASE_ID;
         STRESS_ITEM_NAMES.get(index).copied().unwrap_or("Unknown")
+    } else if (STRESS_ITEM_BASE_ID + STRESS_ITEM_COUNT..STRESS_ITEM_BASE_ID + STRESS_ITEM_COUNT * 2).contains(&item_id) {
+        let index = item_id - (STRESS_ITEM_BASE_ID + STRESS_ITEM_COUNT);
+        let base_name = STRESS_ITEM_NAMES.get(index).copied().unwrap_or("Unknown");
+        match base_name {
+            "Unknown" => "Unknown",
+            name => Box::leak(format!("{}Prime", name).into_boxed_str()),
+        }
     } else if (KLIEN_ITEM_BASE_ID..KLIEN_ITEM_BASE_ID + KLIEN_ITEM_COUNT).contains(&item_id) {
         let index = item_id - KLIEN_ITEM_BASE_ID;
         KLIEN_ITEM_NAMES.get(index).copied().unwrap_or("Unknown")

@@ -39,7 +39,7 @@ pub fn build_stress_scenario() -> ScenarioData {
     // Small stress test of exponentials and cycles.
     // Uses a 20-item loop so one full cycle consumes 2^20 of Alpha and returns 2^20 + 1 Alpha.
     const STRESS_LOOP_ITEM_COUNT: usize = 20;
-    assert!(STRESS_LOOP_ITEM_COUNT <= STRESS_ITEM_COUNT);
+    const {assert!(STRESS_LOOP_ITEM_COUNT <= STRESS_ITEM_COUNT*2);}
 
     let mut recipes = Vec::with_capacity(STRESS_LOOP_ITEM_COUNT);
 
