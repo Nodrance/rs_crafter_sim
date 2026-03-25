@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use rs_crafter_sim::model::item_display_name;
+use rs_crafter_sim::model::{item_display_name, ItemSet, Recipe};
 use rs_crafter_sim::demo_scenarios::{
     build_demo_scenario, build_stress_scenario,
 };
@@ -15,8 +15,12 @@ enum Scenario {
     Stress,
 }
 
-fn print_required_base_items_report(required_items: rs_crafter_sim::model::ItemSet) {
+fn print_required_base_items_report(required_items: ItemSet, should_print_status: bool) {
     // Prints out what items you need to add to the starting inventory to make the target craftable, based on the output of compute_required_base_items.
+    if !should_print_status {
+        return;
+    }
+
     if required_items.items.is_empty() {
         println!("Relaxed deficit analysis found no additional non-producible items to add.");
     } else {
@@ -27,90 +31,65 @@ fn print_required_base_items_report(required_items: rs_crafter_sim::model::ItemS
     }
 }
 
-fn run() {
-    // Loads a demo based on the SCENARIO variable. Some of them work and some overwhelm the program
-    // Runs it ITERATIONS times for timing measurement
+fn run(
+    recipes: &[Recipe],
+    starting_items: &ItemSet,
+    target: &ItemSet,
+    should_print_status: bool,
+) {
     // Starts by checking how many of the item can be crafted
     // Then tries to make a plan for crafting it (in the form of "use this recipe this many times")
     // If it can't be crafted, it'll try to figure out what items you need to add to the starting inventory to make it craftable, and print that out instead.
-    const SCENARIO: Scenario = Scenario::Demo;
-    const ITERATIONS: usize = 1;
-    rs_crafter_sim::debugln!(
-        "[debug] Run starting with scenario={:?}, iterations={}, debug={}.",
-        match SCENARIO {
-            Scenario::Demo => "Demo",
-            Scenario::Stress => "Stress",
-        },
-        ITERATIONS,
-        rs_crafter_sim::DEBUG_LOGGING_ENABLED
-    );
-
-    let (recipes, starting_items, target) = match SCENARIO {
-        Scenario::Demo => build_demo_scenario(),
-        Scenario::Stress => build_stress_scenario(),
-    };
-
-    rs_crafter_sim::debugln!(
-        "[debug] Scenario loaded: recipes={}, starting-items={}, target-items={}",
-        recipes.len(),
-        starting_items.items.len(),
-        target.items.len()
-    );
-
-    for iteration in 0..ITERATIONS {
-        let is_last_iteration = iteration + 1 == ITERATIONS;
-        rs_crafter_sim::debugln!("[debug] Solver iteration {} / {}", iteration + 1, ITERATIONS);
-
-        let max = compute_max_craftable_target_amount(recipes.clone(), starting_items.clone(), target.clone());
+    let max = compute_max_craftable_target_amount(recipes.to_vec(), starting_items.clone(), target.clone());
+    if should_print_status {
         println!("Maximum additional quantity of the primary target item: {}", max);
-        if max == 0 {
+    }
+    if max == 0 {
+        if should_print_status {
             println!("No feasible crafting solution found for the current target and starting inventory.");
-            let required_items = compute_required_base_items(recipes, starting_items, target);
-            print_required_base_items_report(required_items);
-            return;
         }
+        let required_items = compute_required_base_items(recipes.to_vec(), starting_items.clone(), target.clone());
+        print_required_base_items_report(required_items, should_print_status);
+        return;
+    }
 
-        let executable_or_fallback = find_executable_solution_via_cycle_elimination(
-            recipes.clone(),
-            starting_items.clone(),
-            target.clone(),
-        );
+    let executable_or_fallback = find_executable_solution_via_cycle_elimination(
+        recipes.to_vec(),
+        starting_items.clone(),
+        target.clone(),
+    );
 
-        if executable_or_fallback.is_err() {
-            if !is_last_iteration {
-                continue;
-            }
+    if executable_or_fallback.is_err() {
 
-            let disabled_recipe_ids = executable_or_fallback.err().unwrap_or_default();
-            let fallback_recipes = recipes
-                .iter()
-                .filter(|recipe| !disabled_recipe_ids.contains(&recipe.unique_id))
-                .cloned()
-                .collect::<Vec<_>>();
+        let disabled_recipe_ids = executable_or_fallback.err().unwrap_or_default();
+        let fallback_recipes = recipes
+            .iter()
+            .filter(|recipe| !disabled_recipe_ids.contains(&recipe.unique_id))
+            .cloned()
+            .collect::<Vec<_>>();
 
+        if should_print_status {
             println!("No executable plan was found after cycle-elimination branching; running base-item deficit analysis.");
             println!(
                 "Deficit analysis will use {} recipes retained after branch filtering.",
                 fallback_recipes.len()
             );
-            let required_items = compute_required_base_items(
-                fallback_recipes,
-                starting_items.clone(),
-                target.clone(),
-            );
-            print_required_base_items_report(required_items);
-            continue;
         }
+        let required_items = compute_required_base_items(
+            fallback_recipes,
+            starting_items.clone(),
+            target.clone(),
+        );
+        print_required_base_items_report(required_items, should_print_status);
+        return;
+    }
 
-        if !is_last_iteration {
-            continue;
-        }
-
-        let (solution, plan) = executable_or_fallback.unwrap();
+    let (solution, plan) = executable_or_fallback.unwrap();
+    if should_print_status {
         println!("Found an executable crafting solution for the target.");
 
         println!("\nSolved recipe usage totals:");
-        for recipe in &recipes {
+        for recipe in recipes {
             let var_value = solution.recipe_usage_count(recipe);
             if var_value == 0.0 {
                 continue;
@@ -135,7 +114,48 @@ fn run() {
 }
 
 fn main() {
+    const SCENARIO: Scenario = Scenario::Stress;
+    const ITERATIONS: usize = 20;
+
+    println!(
+        "[debug] Run starting with scenario={:?}, iterations={}, debug={}.",
+        match SCENARIO {
+            Scenario::Demo => "Demo",
+            Scenario::Stress => "Stress",
+        },
+        ITERATIONS,
+        rs_crafter_sim::DEBUG_LOGGING_ENABLED
+    );
+
+    let (recipes, starting_items, target) = match SCENARIO {
+        Scenario::Demo => build_demo_scenario(),
+        Scenario::Stress => build_stress_scenario(),
+    };
+
+    rs_crafter_sim::debugln!(
+        "[debug] Scenario loaded: recipes={}, starting-items={}, target-items={}",
+        recipes.len(),
+        starting_items.items.len(),
+        target.items.len()
+    );
+
     let started_at = Instant::now();
-    run();
-    println!("Execution time: {:.3?}", started_at.elapsed());
+    for iteration in 0..ITERATIONS {
+        println!("Solver iteration {} / {}", iteration + 1, ITERATIONS);
+        let should_print_status = iteration + 1 == ITERATIONS;
+        run(&recipes, &starting_items, &target, should_print_status);
+    }
+
+    let elapsed = started_at.elapsed();
+    let average_per_execution = if ITERATIONS > 0 {
+        elapsed / (ITERATIONS as u32)
+    } else {
+        std::time::Duration::ZERO
+    };
+
+    println!(
+        "Execution time: {:.3?} (avg per execution: {:.3?})",
+        elapsed,
+        average_per_execution
+    );
 }

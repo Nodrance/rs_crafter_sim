@@ -8,7 +8,7 @@ pub mod execution_planner;
 pub mod progress_logger;
 pub mod recipe_analysis;
 
-pub const DEBUG_LOGGING_ENABLED: bool = true;
+pub const DEBUG_LOGGING_ENABLED: bool = false;
 
 #[macro_export]
 macro_rules! debugln {

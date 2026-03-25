@@ -36,10 +36,14 @@ fn stress_item_id(index: usize) -> usize {
 }
 
 pub fn build_stress_scenario() -> ScenarioData {
-    // Small stress test of exponentials and cycles. Has to go around an exponential (2^20) loop 50 times
-    let mut recipes = Vec::with_capacity(STRESS_ITEM_COUNT + 1);
+    // Small stress test of exponentials and cycles.
+    // Uses a 20-item loop so one full cycle consumes 2^20 of Alpha and returns 2^20 + 1 Alpha.
+    const STRESS_LOOP_ITEM_COUNT: usize = 20;
+    assert!(STRESS_LOOP_ITEM_COUNT <= STRESS_ITEM_COUNT);
 
-    for index in 0..(STRESS_ITEM_COUNT - 1) {
+    let mut recipes = Vec::with_capacity(STRESS_LOOP_ITEM_COUNT);
+
+    for index in 0..(STRESS_LOOP_ITEM_COUNT - 1) {
         recipes.push(Recipe::from_single_transform(
             stress_item_id(index),
             2,
@@ -50,15 +54,15 @@ pub fn build_stress_scenario() -> ScenarioData {
     }
 
     recipes.push(Recipe::from_single_transform(
-        stress_item_id(STRESS_ITEM_COUNT - 1),
-        1,
+        stress_item_id(STRESS_LOOP_ITEM_COUNT - 1),
+        2,
         stress_item_id(0),
-        (1 << 19) - 1,
+        (1 << STRESS_LOOP_ITEM_COUNT) + 1,
         0,
     ));
 
-    let starting_items = ItemSet::from_item_counts(vec![(stress_item_id(0), 1 << 19)]);
-    let target = ItemSet::from_item_counts(vec![(stress_item_id(0), (1 << 19) + 50)]);
+    let starting_items = ItemSet::from_item_counts(vec![(stress_item_id(0), 1 << STRESS_LOOP_ITEM_COUNT)]);
+    let target = ItemSet::from_item_counts(vec![(stress_item_id(0), (1 << STRESS_LOOP_ITEM_COUNT) + 32)]);
 
     crate::debugln!(
         "[debug] build_stress_scenario: recipes={}, starting-items={}, target-items={}",
