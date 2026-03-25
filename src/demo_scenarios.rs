@@ -73,3 +73,56 @@ pub fn build_stress_scenario() -> ScenarioData {
 
     (recipes, starting_items, target)
 }
+
+pub fn build_sat_scenario() -> ScenarioData {
+    // A small scenario that encodes SAT, specifically (a∨¬b∨¬d)∧(¬a∨b∨¬c)∧(b∨¬c∨d)
+    let a = STRESS_ITEM_BASE_ID;
+    let b = STRESS_ITEM_BASE_ID + 1;
+    let c = STRESS_ITEM_BASE_ID + 2;
+    let d = STRESS_ITEM_BASE_ID + 3;
+
+    let a_true = a+4;
+    let b_true = b+4;
+    let c_true = c+4;
+    let d_true = d+4;
+    let a_false = a+8;
+    let b_false = b+8;
+    let c_false = c+8;
+    let d_false = d+8;
+
+    let term_1 = STRESS_ITEM_BASE_ID + 12;
+    let term_2 = STRESS_ITEM_BASE_ID + 13;
+    let term_3 = STRESS_ITEM_BASE_ID + 14;
+
+    let starting_items = ItemSet::from_item_counts(vec![(a, 1), (b, 1), (c, 1), (d, 1)]);
+
+    let recipes = vec![
+        // Encode the choice of true/false for each variable
+        Recipe::from_single_transform(a, 1, a_true, 100, 0),
+        Recipe::from_single_transform(a, 1, a_false, 100, 0),
+        Recipe::from_single_transform(b, 1, b_true, 100, 0),
+        Recipe::from_single_transform(b, 1, b_false, 100, 0),
+        Recipe::from_single_transform(c, 1, c_true, 100, 0),
+        Recipe::from_single_transform(c, 1, c_false, 100, 0),
+        Recipe::from_single_transform(d, 1, d_true, 100, 0),
+        Recipe::from_single_transform(d, 1, d_false, 100, 0),
+
+        // Encode the clauses
+        Recipe::from_single_transform(a_true, 1, term_1, 1, -100000),
+        Recipe::from_single_transform(b_false, 1, term_1, 1, -100000),
+        Recipe::from_single_transform(d_false, 1, term_1, 1, -100000),
+
+        Recipe::from_single_transform(a_false, 1, term_2, 1, -100000),
+        Recipe::from_single_transform(b_true, 1, term_2, 1, -100000),
+        Recipe::from_single_transform(c_false, 1, term_2, 1, -100000),
+
+        Recipe::from_single_transform(b_true, 1, term_3, 1, -100000),
+        Recipe::from_single_transform(c_false, 1, term_3, 1, -100000),
+        Recipe::from_single_transform(d_true, 1, term_3, 1, -100000),
+
+        // Encode the target as needing all three terms
+        Recipe::from_transform(vec![(term_1, 1), (term_2, 1), (term_3, 1)], vec![(STRESS_ITEM_BASE_ID + 23, 1)], 100000),
+    ];
+    let target = ItemSet::from_item_counts(vec![(STRESS_ITEM_BASE_ID + 23, 1)]);
+    (recipes, starting_items, target)
+}

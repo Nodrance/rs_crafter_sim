@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use rs_crafter_sim::model::{item_display_name, ItemSet, Recipe};
 use rs_crafter_sim::demo_scenarios::{
-    build_demo_scenario, build_stress_scenario,
+    build_demo_scenario, build_stress_scenario, build_sat_scenario,
 };
 use rs_crafter_sim::crafting_solver::{
     compute_max_craftable_target_amount, compute_required_base_items,
@@ -13,6 +13,7 @@ use rs_crafter_sim::crafting_solver::{
 enum Scenario {
     Demo,
     Stress,
+    Sat,
 }
 
 fn print_required_base_items_report(required_items: ItemSet, should_print_status: bool) {
@@ -114,7 +115,7 @@ fn run(
 }
 
 fn main() {
-    const SCENARIO: Scenario = Scenario::Stress;
+    const SCENARIO: Scenario = Scenario::Sat;
     const ITERATIONS: usize = 20;
 
     println!(
@@ -122,6 +123,7 @@ fn main() {
         match SCENARIO {
             Scenario::Demo => "Demo",
             Scenario::Stress => "Stress",
+            Scenario::Sat => "SAT",
         },
         ITERATIONS,
         rs_crafter_sim::DEBUG_LOGGING_ENABLED
@@ -130,6 +132,7 @@ fn main() {
     let (recipes, starting_items, target) = match SCENARIO {
         Scenario::Demo => build_demo_scenario(),
         Scenario::Stress => build_stress_scenario(),
+        Scenario::Sat => build_sat_scenario(),
     };
 
     rs_crafter_sim::debugln!(
